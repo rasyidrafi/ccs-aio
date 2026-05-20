@@ -1,5 +1,6 @@
 import { resolveConfig } from '@/config';
 import { readStatus } from '@/db';
+import { runBackfillOldData } from '@/backfill';
 import { runSync } from '@/sync';
 
 function readFlag(name: string): string | undefined {
@@ -12,6 +13,7 @@ async function main(): Promise<void> {
   const command = process.argv[2];
   const ccsDir = readFlag('--ccs-dir');
   const dbPath = readFlag('--db-path');
+  const sourceDir = readFlag('--source-dir');
 
   if (command === 'sync') {
     const summary = await runSync({ ccsDir, dbPath });
@@ -26,8 +28,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'backfill-old-data') {
+    const summary = await runBackfillOldData({ ccsDir, dbPath, sourceDir });
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
   console.error(
-    'Usage: bun run src/cli.ts <sync|status> [--ccs-dir <path>] [--db-path <path>]'
+    'Usage: bun run src/cli.ts <sync|status|backfill-old-data> [--ccs-dir <path>] [--db-path <path>] [--source-dir <path>]'
   );
   process.exitCode = 1;
 }
