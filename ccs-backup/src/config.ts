@@ -7,6 +7,7 @@ const DEFAULT_PORT = 8097;
 
 export interface ResolvedConfig {
   ccsDir: string;
+  stateDir: string;
   dbPath: string;
   managementUrl: string;
   managementSecret: string;
@@ -22,8 +23,12 @@ export function resolveCcsDir(input?: string): string {
   return path.resolve(expandHome(input ?? path.join(homedir(), '.ccs')));
 }
 
-export function resolveDbPath(ccsDir: string, input?: string): string {
-  return path.resolve(expandHome(input ?? path.join(ccsDir, 'data', 'usage-v2.db')));
+export function resolveStateDir(input?: string): string {
+  return path.resolve(expandHome(input ?? path.join(homedir(), '.ccs-dashboard')));
+}
+
+export function resolveDbPath(stateDir: string, input?: string): string {
+  return path.resolve(expandHome(input ?? path.join(stateDir, 'data', 'usage-v2.db')));
 }
 
 async function readUtf8(filePath: string): Promise<string> {
@@ -63,7 +68,8 @@ function parseManagementSecret(text: string): string {
 
 export async function resolveConfig(ccsDirInput?: string, dbPathInput?: string): Promise<ResolvedConfig> {
   const ccsDir = resolveCcsDir(ccsDirInput);
-  const dbPath = resolveDbPath(ccsDir, dbPathInput);
+  const stateDir = resolveStateDir();
+  const dbPath = resolveDbPath(stateDir, dbPathInput);
   const configPath = path.join(ccsDir, 'config.yaml');
 
   let managementSecret = DEFAULT_MANAGEMENT_SECRET;
@@ -79,6 +85,7 @@ export async function resolveConfig(ccsDirInput?: string, dbPathInput?: string):
 
   return {
     ccsDir,
+    stateDir,
     dbPath,
     managementSecret,
     managementUrl: `http://127.0.0.1:${port}`,

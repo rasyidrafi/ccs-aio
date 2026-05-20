@@ -1,0 +1,11 @@
+[Unit]
+Description=Run CCS durable usage sync every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=ccs-backup.service
+
+[Install]
+WantedBy=timers.target

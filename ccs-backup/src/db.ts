@@ -1,10 +1,15 @@
 import path from 'node:path';
-import { mkdir } from 'node:fs/promises';
+import { access, mkdir } from 'node:fs/promises';
 import { Database } from 'bun:sqlite';
-import type { SyncSummary, UsageEventRecord } from '@/types';
+import type { StatusSummary, SyncSummary, UsageEventRecord } from '@/types';
 
 interface ChangeRow {
   changes: number;
+}
+
+interface TimestampBoundsRow {
+  first_timestamp: string | null;
+  last_timestamp: string | null;
 }
 
 function createSchema(db: Database): void {
@@ -165,5 +170,97 @@ export function writeSyncError(db: Database, startedAt: string, error: Error): v
 
   for (const [key, value] of entries) {
     upsert.run([key, value]);
+  }
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readSyncValue(db: Database, key: string): string | null {
+  const row = db.query<{ value: string }>('SELECT value FROM sync_state WHERE key = ?').get([key]);
+  return row?.value ?? null;
+}
+
+function parseNullableInt(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+export async function readStatus(dbPath: string): Promise<StatusSummary> {
+  const exists = await fileExists(dbPath);
+  if (!exists) {
+    return {
+      dbPath,
+      exists: false,
+      rawEventCount: 0,
+      firstEventAt: null,
+      lastEventAt: null,
+      sync: {
+        status: null,
+        startedAt: null,
+        completedAt: null,
+        error: null,
+        inserted: null,
+        updated: null,
+        totalInputEvents: null,
+        dedupedInputEvents: null,
+      },
+      sources: [
+        { source: 'live', status: null, eventCount: null, message: null },
+        { source: 'snapshot', status: null, eventCount: null, message: null },
+      ],
+    };
+  }
+
+  const db = await openDatabase(dbPath);
+
+  try {
+    const countRow = db.query<{ count: number }>('SELECT COUNT(*) as count FROM raw_usage_events').get();
+    const bounds = db
+      .query<TimestampBoundsRow>(
+        'SELECT MIN(timestamp) as first_timestamp, MAX(timestamp) as last_timestamp FROM raw_usage_events'
+      )
+      .get();
+
+    return {
+      dbPath,
+      exists: true,
+      rawEventCount: countRow?.count ?? 0,
+      firstEventAt: bounds?.first_timestamp ?? null,
+      lastEventAt: bounds?.last_timestamp ?? null,
+      sync: {
+        status: readSyncValue(db, 'last_run_status'),
+        startedAt: readSyncValue(db, 'last_run_started_at'),
+        completedAt: readSyncValue(db, 'last_run_completed_at'),
+        error: readSyncValue(db, 'last_run_error'),
+        inserted: parseNullableInt(readSyncValue(db, 'last_run_inserted')),
+        updated: parseNullableInt(readSyncValue(db, 'last_run_updated')),
+        totalInputEvents: parseNullableInt(readSyncValue(db, 'last_run_total_input_events')),
+        dedupedInputEvents: parseNullableInt(readSyncValue(db, 'last_run_deduped_input_events')),
+      },
+      sources: [
+        {
+          source: 'live',
+          status: readSyncValue(db, 'source.live.status'),
+          eventCount: parseNullableInt(readSyncValue(db, 'source.live.event_count')),
+          message: readSyncValue(db, 'source.live.message'),
+        },
+        {
+          source: 'snapshot',
+          status: readSyncValue(db, 'source.snapshot.status'),
+          eventCount: parseNullableInt(readSyncValue(db, 'source.snapshot.event_count')),
+          message: readSyncValue(db, 'source.snapshot.message'),
+        },
+      ],
+    };
+  } finally {
+    db.close();
   }
 }

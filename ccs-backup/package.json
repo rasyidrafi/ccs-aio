@@ -5,7 +5,9 @@
   "packageManager": "bun@1.3.9",
   "scripts": {
     "sync": "bun run src/cli.ts sync",
-    "typecheck": "tsc --noEmit"
+    "status": "bun run src/cli.ts status",
+    "install:systemd": "bash scripts/install-systemd.sh",
+    "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "^1.3.12",

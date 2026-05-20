@@ -42,3 +42,29 @@ export interface SyncSummary {
   dedupedInputEvents: number;
   sources: SyncSourceReport[];
 }
+
+export interface StatusSourceState {
+  source: SourceKind;
+  status: string | null;
+  eventCount: number | null;
+  message: string | null;
+}
+
+export interface StatusSummary {
+  dbPath: string;
+  exists: boolean;
+  rawEventCount: number;
+  firstEventAt: string | null;
+  lastEventAt: string | null;
+  sync: {
+    status: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    error: string | null;
+    inserted: number | null;
+    updated: number | null;
+    totalInputEvents: number | null;
+    dedupedInputEvents: number | null;
+  };
+  sources: StatusSourceState[];
+}
