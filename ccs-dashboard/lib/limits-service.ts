@@ -201,6 +201,15 @@ function resolveWindow(label: string, raw: CodexUsageWindow | undefined | null):
   }
 }
 
+function normalizePlanType(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase() ?? ""
+  if (!normalized) return null
+  if (normalized === "business" || normalized === "team" || normalized === "blue") return "team"
+  if (normalized === "plus") return "plus"
+  if (normalized === "free") return "free"
+  return normalized
+}
+
 async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
   planType: string | null
   fiveHour: LimitsQuotaWindow | null
@@ -232,7 +241,7 @@ async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
     const payload = (await response.json()) as CodexUsageResponse
     const rateLimit = payload.rate_limit || payload.rateLimit
     return {
-      planType: (payload.plan_type || payload.planType || null)?.toString() ?? null,
+      planType: normalizePlanType((payload.plan_type || payload.planType || null)?.toString()),
       fiveHour: resolveWindow("5 hour", rateLimit?.primary_window || rateLimit?.primaryWindow),
       weekly: resolveWindow("Weekly", rateLimit?.secondary_window || rateLimit?.secondaryWindow),
     }

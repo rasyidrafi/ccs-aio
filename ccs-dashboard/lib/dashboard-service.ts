@@ -1,8 +1,10 @@
 import { homedir } from "node:os";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
+import YAML from "yaml";
 
+import { shortUsageHash } from "@/lib/redaction";
 import type {
   DashboardKeyRow,
   DashboardModelRow,
@@ -54,8 +56,15 @@ interface ModelSummaryRow {
   cost: number;
 }
 
+interface ApiKeyNameCacheEntry {
+  signature: string;
+  names: Map<string, string>;
+}
+
 type RollupGranularity = "hourly" | "daily" | "monthly";
 type RollupTableName = "rollup_hourly" | "rollup_daily" | "rollup_monthly";
+
+let apiKeyNameCache: ApiKeyNameCacheEntry | null = null;
 
 function getDatabasePath(): string {
   return path.join(homedir(), ".ccs-dashboard", "data", "usage-v2.db");
@@ -63,6 +72,14 @@ function getDatabasePath(): string {
 
 function getCcsConfigPath(): string {
   return path.join(homedir(), ".ccs", "config.yaml");
+}
+
+function getCliproxyConfigPath(): string {
+  return path.join(homedir(), ".ccs", "cliproxy", "config.yaml");
+}
+
+function getCliproxyConfigDirPath(): string {
+  return path.join(homedir(), ".ccs", "cliproxy");
 }
 
 function parseGranularityInput(value: string | null): TrendGranularityInput | undefined {
@@ -222,6 +239,28 @@ function stepBucket(bucket: Date, granularity: TrendGranularity): Date {
   return next;
 }
 
+function stepBucketBack(bucket: Date, granularity: TrendGranularity): Date {
+  const previous = new Date(bucket);
+  if (granularity === "hourly") {
+    previous.setHours(previous.getHours() - 1);
+    return previous;
+  }
+  if (granularity === "daily") {
+    previous.setDate(previous.getDate() - 1);
+    return previous;
+  }
+  if (granularity === "weekly") {
+    previous.setDate(previous.getDate() - 7);
+    return previous;
+  }
+  if (granularity === "monthly") {
+    previous.setMonth(previous.getMonth() - 1, 1);
+    return previous;
+  }
+  previous.setFullYear(previous.getFullYear() - 1, 0, 1);
+  return previous;
+}
+
 function formatLocalBucketStart(date: Date, granularity: RollupGranularity): string {
   const bucket = startOfLocalBucket(date, granularity);
   const year = bucket.getFullYear();
@@ -246,7 +285,6 @@ function formatBucketLabel(bucket: Date, granularity: TrendGranularity): string 
   if (granularity === "hourly") {
     return new Intl.DateTimeFormat("en-US", {
       hour: "2-digit",
-      minute: "2-digit",
       hour12: false,
     }).format(bucket);
   }
@@ -269,7 +307,6 @@ function formatBucketLabel(bucket: Date, granularity: TrendGranularity): string 
   if (granularity === "monthly") {
     return new Intl.DateTimeFormat("en-US", {
       month: "short",
-      year: "2-digit",
     }).format(bucket);
   }
   return String(bucket.getFullYear());
@@ -323,23 +360,85 @@ function buildSourceBadges(mode: "live" | "fallback" | "mixed"): DashboardSource
   return [{ label: "Stored history", kind: "fallback" }];
 }
 
-function inferKeyMeta(providerKey: string): Pick<DashboardKeyRow, "displayName" | "fingerprint" | "maskedKey" | "providerLabel"> {
+async function readConfiguredApiKeyNames(): Promise<Map<string, string>> {
+  const configFiles = new Set<string>([getCliproxyConfigPath()]);
+
+  try {
+    try {
+      const entries = await readdir(getCliproxyConfigDirPath(), { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!/^config(?:-\d+)?\.ya?ml$/i.test(entry.name)) continue;
+        configFiles.add(path.join(getCliproxyConfigDirPath(), entry.name));
+      }
+    } catch {
+      // Fall back to the default config path if the directory scan is unavailable.
+    }
+
+    const sortedFiles = Array.from(configFiles).sort();
+    const signatureParts = await Promise.all(
+      sortedFiles.map(async (filePath) => {
+        try {
+          const fileStat = await stat(filePath);
+          return `${filePath}:${fileStat.mtimeMs}:${fileStat.size}`;
+        } catch {
+          return `${filePath}:missing`;
+        }
+      })
+    );
+    const signature = signatureParts.join("|");
+
+    if (apiKeyNameCache?.signature === signature) {
+      return apiKeyNameCache.names;
+    }
+
+    const names = new Map<string, string>();
+    for (const filePath of sortedFiles) {
+      const text = await readFile(filePath, "utf8");
+      const parsed = YAML.parse(text) as { "api-keys"?: unknown } | null;
+      const apiKeys = Array.isArray(parsed?.["api-keys"]) ? parsed["api-keys"] : [];
+
+      for (const entry of apiKeys) {
+        if (typeof entry !== "string") continue;
+        const separatorIndex = entry.indexOf("-sk-");
+        if (separatorIndex <= 0) continue;
+
+        const name = entry.slice(0, separatorIndex).trim();
+        if (!name) continue;
+
+        names.set(shortUsageHash(entry).slice(0, 8), name);
+      }
+    }
+
+    apiKeyNameCache = { signature, names };
+    return names;
+  } catch {
+    return new Map();
+  }
+}
+
+function inferKeyMeta(
+  providerKey: string,
+  configuredName?: string
+): Pick<DashboardKeyRow, "displayName" | "fingerprint" | "maskedKey" | "providerLabel"> {
   const value = providerKey.replace(/^api-key:/, "");
   const fingerprint = value.slice(-4).toUpperCase() || "KEY";
-  const providerLabel = value.includes("claude")
+  const providerLabel = configuredName || (value.includes("claude")
     ? "Claude"
     : value.includes("gemini")
       ? "Gemini"
       : value.includes("codex") || value.includes("gpt")
         ? "Codex"
-        : "API key";
+        : "API key");
 
   return {
-    displayName: value
-      .split(/[-_]+/)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" "),
+    displayName:
+      configuredName ||
+      value
+        .split(/[-_]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" "),
     fingerprint,
     maskedKey: `sk-...${fingerprint}`,
     providerLabel,
@@ -349,6 +448,27 @@ function inferKeyMeta(providerKey: string): Pick<DashboardKeyRow, "displayName" 
 function readSyncValue(db: DatabaseSync, key: string): string | null {
   const row = db.prepare("SELECT value FROM sync_state WHERE key = ?").get(key) as { value?: string } | undefined;
   return typeof row?.value === "string" ? row.value : null;
+}
+
+function resolveTrendBucketBounds(
+  query: DashboardQuery,
+  granularity: TrendGranularity,
+  range: DashboardWindow,
+  trendRows: TrendRow[]
+): { from: Date; to: Date } {
+  if (query.preset !== "all" || trendRows.length === 0) {
+    return { from: range.from, to: range.to };
+  }
+
+  if (granularity !== "monthly" && granularity !== "yearly") {
+    return { from: range.from, to: range.to };
+  }
+
+  const latestBucket = startOfLocalBucket(parseLocalBucket(trendRows[trendRows.length - 1].bucket_start), granularity);
+  return {
+    from: stepBucketBack(latestBucket, granularity),
+    to: latestBucket,
+  };
 }
 
 function emptyPayload(
@@ -390,6 +510,7 @@ function emptyPayload(
 
 export async function getDashboardPayload(query: DashboardQuery): Promise<DashboardPayload> {
   const managementUrl = await readManagementUrl();
+  const configuredApiKeyNames = await readConfiguredApiKeyNames();
   const dbPath = getDatabasePath();
 
   let db: DatabaseSync | null = null;
@@ -465,10 +586,11 @@ export async function getDashboardPayload(query: DashboardQuery): Promise<Dashbo
       ORDER BY cost DESC, requests DESC`
     ).all(rangeFromBucket, rangeToBucket) as unknown as ModelSummaryRow[];
 
+    const trendBucketBounds = resolveTrendBucketBounds(query, resolvedGranularity, range, trendRows);
     const trendMap = new Map<string, DashboardTrendPoint>();
     for (
-      let bucket = startOfLocalBucket(range.from, resolvedGranularity);
-      bucket.getTime() <= range.to.getTime();
+      let bucket = startOfLocalBucket(trendBucketBounds.from, resolvedGranularity);
+      bucket.getTime() <= trendBucketBounds.to.getTime();
       bucket = stepBucket(bucket, resolvedGranularity)
     ) {
       const key = bucket.toISOString();
@@ -497,7 +619,8 @@ export async function getDashboardPayload(query: DashboardQuery): Promise<Dashbo
     }
 
     const keys: DashboardKeyRow[] = keyRows.map((row) => {
-      const inferred = inferKeyMeta(row.provider_key);
+      const keyHash = row.provider_key.replace(/^api-key:/, "").toLowerCase();
+      const inferred = inferKeyMeta(row.provider_key, configuredApiKeyNames.get(keyHash));
       return {
         id: row.provider_key,
         ...inferred,
