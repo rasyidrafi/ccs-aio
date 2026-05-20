@@ -70,6 +70,7 @@ export interface DashboardPayload {
     mode: "live" | "fallback" | "mixed";
     managementUrl: string;
     discoveredKeyCount: number;
+    lastUpdatedAt: string | null;
     note: string | null;
     badges: DashboardSourceBadge[];
   };

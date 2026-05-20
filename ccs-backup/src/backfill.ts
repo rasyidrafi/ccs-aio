@@ -37,13 +37,6 @@ export interface BackfillSummary {
   updated: number;
 }
 
-function formatLocalDate(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
 function resolveSourceDbPath(sourceDir?: string): string {
   const root = sourceDir
     ? path.resolve(sourceDir)
@@ -74,11 +67,6 @@ export async function runBackfillOldData(options: BackfillOptions = {}): Promise
   const config = await resolveConfig(options.ccsDir, options.dbPath);
   const sourceDbPath = resolveSourceDbPath(options.sourceDir);
 
-  const now = new Date();
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  const allowedDates = new Set([formatLocalDate(now), formatLocalDate(yesterday)]);
-
   const sourceDb = new BunDatabase(sourceDbPath);
   const targetDb = await openDatabase(config.dbPath);
 
@@ -103,23 +91,26 @@ export async function runBackfillOldData(options: BackfillOptions = {}): Promise
       )
       .all();
 
-    const filtered = rows.filter((row) => {
-      const parsed = new Date(row.timestamp);
-      return allowedDates.has(formatLocalDate(parsed));
-    });
-
     const { inserted, updated } = persistEvents(
       targetDb,
-      filtered.map(toUsageEventRecord)
+      rows.map(toUsageEventRecord)
     );
+
+    const importedDates = Array.from(
+      new Set(
+        rows
+          .map((row) => row.timestamp.slice(0, 10))
+          .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value))
+      )
+    ).sort();
 
     return {
       startedAt,
       completedAt: new Date().toISOString(),
       sourceDbPath,
       targetDbPath: config.dbPath,
-      importedDates: Array.from(allowedDates).sort(),
-      candidateRows: filtered.length,
+      importedDates,
+      candidateRows: rows.length,
       inserted,
       updated,
     };

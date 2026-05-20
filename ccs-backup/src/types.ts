@@ -62,6 +62,11 @@ export interface StatusSummary {
   rawEventCount: number;
   firstEventAt: string | null;
   lastEventAt: string | null;
+  serving: {
+    schemaVersion: string | null;
+    lastRebuiltAt: string | null;
+    lastUpdatedAt: string | null;
+  };
   rollups: {
     hourly: RollupStatusSummary;
     daily: RollupStatusSummary;

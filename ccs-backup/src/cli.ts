@@ -1,5 +1,5 @@
 import { resolveConfig } from '@/config';
-import { readStatus } from '@/db';
+import { readStatus, rebuildRollups } from '@/db';
 import { runBackfillOldData } from '@/backfill';
 import { runSync } from '@/sync';
 
@@ -34,8 +34,15 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'rebuild-rollups') {
+    const config = await resolveConfig(ccsDir, dbPath);
+    const summary = await rebuildRollups(config.dbPath);
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
   console.error(
-    'Usage: bun run src/cli.ts <sync|status|backfill-old-data> [--ccs-dir <path>] [--db-path <path>] [--source-dir <path>]'
+    'Usage: bun run src/cli.ts <sync|status|backfill-old-data|rebuild-rollups> [--ccs-dir <path>] [--db-path <path>] [--source-dir <path>]'
   );
   process.exitCode = 1;
 }

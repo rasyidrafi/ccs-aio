@@ -21,6 +21,11 @@ interface RollupBoundsRow {
   last_bucket_start: string | null;
 }
 
+interface ExistingEventRow {
+  live_seen: number;
+  snapshot_seen: number;
+}
+
 interface RollupAggregate {
   bucketStart: string;
   providerKey: string;
@@ -31,9 +36,50 @@ interface RollupAggregate {
   cacheReadTokens: number;
   cost: number;
   failedCount: number;
+  liveRequestCount: number;
+  snapshotRequestCount: number;
+  lastEventAt: string;
+}
+
+interface SourceDeltaEvent {
+  providerKey: string;
+  model: string;
+  timestamp: string;
+  timestampMs: number;
+  liveRequestCount: number;
+  snapshotRequestCount: number;
+}
+
+interface RollupSourceDelta {
+  bucketStart: string;
+  providerKey: string;
+  model: string;
+  liveRequestCount: number;
+  snapshotRequestCount: number;
+  lastEventAt: string;
+}
+
+interface RollupTableColumnRow {
+  name: string;
 }
 
 type RollupGranularity = 'hourly' | 'daily' | 'monthly';
+type RollupTableName = 'rollup_hourly' | 'rollup_daily' | 'rollup_monthly';
+
+const ROLLUP_SCHEMA_VERSION = '2';
+const ROLLUP_TABLES: RollupTableName[] = ['rollup_hourly', 'rollup_daily', 'rollup_monthly'];
+
+export interface RebuildRollupsSummary {
+  startedAt: string;
+  completedAt: string;
+  dbPath: string;
+  rawEventCount: number;
+  rollups: {
+    hourly: number;
+    daily: number;
+    monthly: number;
+  };
+}
 
 function createSchema(db: Database): void {
   db.exec(`
@@ -73,6 +119,9 @@ function createSchema(db: Database): void {
       cache_read_tokens INTEGER NOT NULL,
       cost REAL NOT NULL,
       failed_count INTEGER NOT NULL DEFAULT 0,
+      live_request_count INTEGER NOT NULL DEFAULT 0,
+      snapshot_request_count INTEGER NOT NULL DEFAULT 0,
+      last_event_at TEXT,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (bucket_start, provider_key, model)
     );
@@ -89,6 +138,9 @@ function createSchema(db: Database): void {
       cache_read_tokens INTEGER NOT NULL,
       cost REAL NOT NULL,
       failed_count INTEGER NOT NULL DEFAULT 0,
+      live_request_count INTEGER NOT NULL DEFAULT 0,
+      snapshot_request_count INTEGER NOT NULL DEFAULT 0,
+      last_event_at TEXT,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (bucket_start, provider_key, model)
     );
@@ -105,6 +157,9 @@ function createSchema(db: Database): void {
       cache_read_tokens INTEGER NOT NULL,
       cost REAL NOT NULL,
       failed_count INTEGER NOT NULL DEFAULT 0,
+      live_request_count INTEGER NOT NULL DEFAULT 0,
+      snapshot_request_count INTEGER NOT NULL DEFAULT 0,
+      last_event_at TEXT,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (bucket_start, provider_key, model)
     );
@@ -119,27 +174,48 @@ function createSchema(db: Database): void {
   `);
 }
 
+function listTableColumns(db: Database, tableName: string): Set<string> {
+  const rows = db.query<RollupTableColumnRow>(`PRAGMA table_info(${tableName})`).all();
+  return new Set(rows.map((row) => row.name));
+}
+
+function ensureRollupColumns(db: Database, tableName: RollupTableName): void {
+  const columns = listTableColumns(db, tableName);
+  if (!columns.has('live_request_count')) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN live_request_count INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!columns.has('snapshot_request_count')) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN snapshot_request_count INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!columns.has('last_event_at')) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN last_event_at TEXT`);
+  }
+}
+
 export async function openDatabase(dbPath: string): Promise<Database> {
   await mkdir(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true });
   createSchema(db);
+  for (const tableName of ROLLUP_TABLES) {
+    ensureRollupColumns(db, tableName);
+  }
   return db;
 }
 
-function formatUtcBucketStart(timestampMs: number, granularity: RollupGranularity): string {
+function formatLocalBucketStart(timestampMs: number, granularity: RollupGranularity): string {
   const date = new Date(timestampMs);
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(date.getUTCDate()).padStart(2, '0');
-  const hour = String(date.getUTCHours()).padStart(2, '0');
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hour = String(date.getHours()).padStart(2, '0');
 
   if (granularity === 'hourly') {
-    return `${year}-${month}-${day}T${hour}:00:00.000Z`;
+    return `${year}-${month}-${day}T${hour}:00:00`;
   }
   if (granularity === 'daily') {
-    return `${year}-${month}-${day}T00:00:00.000Z`;
+    return `${year}-${month}-${day}T00:00:00`;
   }
-  return `${year}-${month}-01T00:00:00.000Z`;
+  return `${year}-${month}-01T00:00:00`;
 }
 
 function buildRollupAggregates(
@@ -149,7 +225,7 @@ function buildRollupAggregates(
   const aggregates = new Map<string, RollupAggregate>();
 
   for (const event of events) {
-    const bucketStart = formatUtcBucketStart(event.timestampMs, granularity);
+    const bucketStart = formatLocalBucketStart(event.timestampMs, granularity);
     const key = [bucketStart, event.providerKey, event.model].join('|');
     const existing = aggregates.get(key);
     if (existing) {
@@ -159,6 +235,11 @@ function buildRollupAggregates(
       existing.cacheReadTokens += event.cacheReadTokens;
       existing.cost += event.cost;
       existing.failedCount += event.failed ? event.requestCount : 0;
+      existing.liveRequestCount += event.liveSeen ? event.requestCount : 0;
+      existing.snapshotRequestCount += event.snapshotSeen ? event.requestCount : 0;
+      if (event.timestamp > existing.lastEventAt) {
+        existing.lastEventAt = event.timestamp;
+      }
       continue;
     }
 
@@ -172,6 +253,9 @@ function buildRollupAggregates(
       cacheReadTokens: event.cacheReadTokens,
       cost: event.cost,
       failedCount: event.failed ? event.requestCount : 0,
+      liveRequestCount: event.liveSeen ? event.requestCount : 0,
+      snapshotRequestCount: event.snapshotSeen ? event.requestCount : 0,
+      lastEventAt: event.timestamp,
     });
   }
 
@@ -180,9 +264,41 @@ function buildRollupAggregates(
   );
 }
 
+function buildRollupSourceDeltas(
+  events: SourceDeltaEvent[],
+  granularity: RollupGranularity
+): RollupSourceDelta[] {
+  const deltas = new Map<string, RollupSourceDelta>();
+
+  for (const event of events) {
+    const bucketStart = formatLocalBucketStart(event.timestampMs, granularity);
+    const key = [bucketStart, event.providerKey, event.model].join('|');
+    const existing = deltas.get(key);
+    if (existing) {
+      existing.liveRequestCount += event.liveRequestCount;
+      existing.snapshotRequestCount += event.snapshotRequestCount;
+      if (event.timestamp > existing.lastEventAt) {
+        existing.lastEventAt = event.timestamp;
+      }
+      continue;
+    }
+
+    deltas.set(key, {
+      bucketStart,
+      providerKey: event.providerKey,
+      model: event.model,
+      liveRequestCount: event.liveRequestCount,
+      snapshotRequestCount: event.snapshotRequestCount,
+      lastEventAt: event.timestamp,
+    });
+  }
+
+  return Array.from(deltas.values()).sort((left, right) => left.bucketStart.localeCompare(right.bucketStart));
+}
+
 function upsertRollupTable(
   db: Database,
-  tableName: 'rollup_hourly' | 'rollup_daily' | 'rollup_monthly',
+  tableName: RollupTableName,
   rows: RollupAggregate[]
 ): void {
   if (rows.length === 0) {
@@ -199,8 +315,11 @@ function upsertRollupTable(
       output_tokens,
       cache_read_tokens,
       cost,
-      failed_count
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      failed_count,
+      live_request_count,
+      snapshot_request_count,
+      last_event_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(bucket_start, provider_key, model) DO UPDATE SET
       request_count = ${tableName}.request_count + excluded.request_count,
       input_tokens = ${tableName}.input_tokens + excluded.input_tokens,
@@ -208,6 +327,9 @@ function upsertRollupTable(
       cache_read_tokens = ${tableName}.cache_read_tokens + excluded.cache_read_tokens,
       cost = ${tableName}.cost + excluded.cost,
       failed_count = ${tableName}.failed_count + excluded.failed_count,
+      live_request_count = ${tableName}.live_request_count + excluded.live_request_count,
+      snapshot_request_count = ${tableName}.snapshot_request_count + excluded.snapshot_request_count,
+      last_event_at = MAX(COALESCE(${tableName}.last_event_at, ''), COALESCE(excluded.last_event_at, '')),
       updated_at = CURRENT_TIMESTAMP`
   );
 
@@ -222,11 +344,164 @@ function upsertRollupTable(
       row.cacheReadTokens,
       row.cost,
       row.failedCount,
+      row.liveRequestCount,
+      row.snapshotRequestCount,
+      row.lastEventAt,
     ]);
   }
 }
 
+function upsertRollupSourceDeltas(
+  db: Database,
+  tableName: RollupTableName,
+  rows: RollupSourceDelta[]
+): void {
+  if (rows.length === 0) {
+    return;
+  }
+
+  const upsert = db.query(
+    `INSERT INTO ${tableName} (
+      bucket_start,
+      provider_key,
+      model,
+      request_count,
+      input_tokens,
+      output_tokens,
+      cache_read_tokens,
+      cost,
+      failed_count,
+      live_request_count,
+      snapshot_request_count,
+      last_event_at
+    ) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?)
+    ON CONFLICT(bucket_start, provider_key, model) DO UPDATE SET
+      live_request_count = ${tableName}.live_request_count + excluded.live_request_count,
+      snapshot_request_count = ${tableName}.snapshot_request_count + excluded.snapshot_request_count,
+      last_event_at = MAX(COALESCE(${tableName}.last_event_at, ''), COALESCE(excluded.last_event_at, '')),
+      updated_at = CURRENT_TIMESTAMP`
+  );
+
+  for (const row of rows) {
+    upsert.run([
+      row.bucketStart,
+      row.providerKey,
+      row.model,
+      row.liveRequestCount,
+      row.snapshotRequestCount,
+      row.lastEventAt,
+    ]);
+  }
+}
+
+function writeSyncValues(db: Database, entries: Array<[string, string]>): void {
+  const upsert = db.query(
+    `INSERT INTO sync_state (key, value, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO UPDATE SET
+      value = excluded.value,
+      updated_at = CURRENT_TIMESTAMP`
+  );
+
+  const runBatch = db.transaction((pairs: Array<[string, string]>) => {
+    for (const [key, value] of pairs) {
+      upsert.run([key, value]);
+    }
+  });
+
+  runBatch(entries);
+}
+
+function readSyncValue(db: Database, key: string): string | null {
+  const row = db.query<{ value: string }>('SELECT value FROM sync_state WHERE key = ?').get([key]);
+  return row?.value ?? null;
+}
+
+function localBucketExpression(granularity: RollupGranularity): string {
+  if (granularity === 'hourly') {
+    return "strftime('%Y-%m-%dT%H:00:00', timestamp_ms / 1000, 'unixepoch', 'localtime')";
+  }
+  if (granularity === 'daily') {
+    return "strftime('%Y-%m-%dT00:00:00', timestamp_ms / 1000, 'unixepoch', 'localtime')";
+  }
+  return "strftime('%Y-%m-01T00:00:00', timestamp_ms / 1000, 'unixepoch', 'localtime')";
+}
+
+function clearRollupTables(db: Database): void {
+  db.exec(`
+    DELETE FROM rollup_hourly;
+    DELETE FROM rollup_daily;
+    DELETE FROM rollup_monthly;
+  `);
+}
+
+function rebuildRollupTable(
+  db: Database,
+  tableName: RollupTableName,
+  bucketExpression: string
+): number {
+  db.exec(
+    `INSERT INTO ${tableName} (
+      bucket_start,
+      provider_key,
+      model,
+      request_count,
+      input_tokens,
+      output_tokens,
+      cache_read_tokens,
+      cost,
+      failed_count,
+      live_request_count,
+      snapshot_request_count,
+      last_event_at,
+      updated_at
+    )
+    SELECT
+      ${bucketExpression} as bucket_start,
+      provider_key,
+      model,
+      SUM(request_count) as request_count,
+      SUM(input_tokens) as input_tokens,
+      SUM(output_tokens) as output_tokens,
+      SUM(cache_read_tokens) as cache_read_tokens,
+      SUM(cost) as cost,
+      SUM(CASE WHEN failed = 1 THEN request_count ELSE 0 END) as failed_count,
+      SUM(CASE WHEN live_seen = 1 THEN request_count ELSE 0 END) as live_request_count,
+      SUM(CASE WHEN snapshot_seen = 1 THEN request_count ELSE 0 END) as snapshot_request_count,
+      MAX(timestamp) as last_event_at,
+      CURRENT_TIMESTAMP as updated_at
+    FROM raw_usage_events
+    GROUP BY bucket_start, provider_key, model`
+  );
+
+  const row = db.query<RollupCountRow>(`SELECT COUNT(*) as count FROM ${tableName}`).get();
+  return row?.count ?? 0;
+}
+
+export function ensureServingTables(db: Database): void {
+  if (readSyncValue(db, 'serving.schema_version') === ROLLUP_SCHEMA_VERSION) {
+    return;
+  }
+
+  const runBatch = db.transaction(() => {
+    clearRollupTables(db);
+    rebuildRollupTable(db, 'rollup_hourly', localBucketExpression('hourly'));
+    rebuildRollupTable(db, 'rollup_daily', localBucketExpression('daily'));
+    rebuildRollupTable(db, 'rollup_monthly', localBucketExpression('monthly'));
+    const now = new Date().toISOString();
+    writeSyncValues(db, [
+      ['serving.schema_version', ROLLUP_SCHEMA_VERSION],
+      ['serving.last_rebuilt_at', now],
+      ['serving.last_updated_at', now],
+    ]);
+  });
+
+  runBatch();
+}
+
 export function persistEvents(db: Database, events: UsageEventRecord[]): { inserted: number; updated: number } {
+  ensureServingTables(db);
+
   if (events.length === 0) {
     return { inserted: 0, updated: 0 };
   }
@@ -253,14 +528,18 @@ export function persistEvents(db: Database, events: UsageEventRecord[]): { inser
       last_ingested_at = CURRENT_TIMESTAMP`
   );
   const readChanges = db.query<ChangeRow>('SELECT changes() as changes');
-  const existing = db.query<{ count: number }>('SELECT COUNT(*) as count FROM raw_usage_events WHERE event_key = ?');
+  const existing = db.query<ExistingEventRow>(
+    'SELECT live_seen, snapshot_seen FROM raw_usage_events WHERE event_key = ?'
+  );
 
   let inserted = 0;
   let updated = 0;
   const insertedEvents: UsageEventRecord[] = [];
+  const sourceDeltaEvents: SourceDeltaEvent[] = [];
+
   const runBatch = db.transaction((rows: UsageEventRecord[]) => {
     for (const row of rows) {
-      const existedBefore = (existing.get([row.eventKey])?.count ?? 0) > 0;
+      const existingRow = existing.get([row.eventKey]);
       insert.run([
         row.eventKey,
         row.providerKey,
@@ -276,34 +555,93 @@ export function persistEvents(db: Database, events: UsageEventRecord[]): { inser
         row.liveSeen ? 1 : 0,
         row.snapshotSeen ? 1 : 0,
       ]);
-      if ((readChanges.get()?.changes ?? 0) > 0) {
-        if (existedBefore) {
-          updated += 1;
-        } else {
-          inserted += 1;
-          insertedEvents.push(row);
-        }
+
+      if ((readChanges.get()?.changes ?? 0) === 0) {
+        continue;
+      }
+
+      if (!existingRow) {
+        inserted += 1;
+        insertedEvents.push(row);
+        continue;
+      }
+
+      updated += 1;
+      const liveRequestCount = row.liveSeen && existingRow.live_seen === 0 ? row.requestCount : 0;
+      const snapshotRequestCount =
+        row.snapshotSeen && existingRow.snapshot_seen === 0 ? row.requestCount : 0;
+
+      if (liveRequestCount > 0 || snapshotRequestCount > 0) {
+        sourceDeltaEvents.push({
+          providerKey: row.providerKey,
+          model: row.model,
+          timestamp: row.timestamp,
+          timestampMs: row.timestampMs,
+          liveRequestCount,
+          snapshotRequestCount,
+        });
       }
     }
 
     upsertRollupTable(db, 'rollup_hourly', buildRollupAggregates(insertedEvents, 'hourly'));
     upsertRollupTable(db, 'rollup_daily', buildRollupAggregates(insertedEvents, 'daily'));
     upsertRollupTable(db, 'rollup_monthly', buildRollupAggregates(insertedEvents, 'monthly'));
+
+    upsertRollupSourceDeltas(db, 'rollup_hourly', buildRollupSourceDeltas(sourceDeltaEvents, 'hourly'));
+    upsertRollupSourceDeltas(db, 'rollup_daily', buildRollupSourceDeltas(sourceDeltaEvents, 'daily'));
+    upsertRollupSourceDeltas(db, 'rollup_monthly', buildRollupSourceDeltas(sourceDeltaEvents, 'monthly'));
+
+    if (inserted > 0 || updated > 0) {
+      writeSyncValues(db, [
+        ['serving.schema_version', ROLLUP_SCHEMA_VERSION],
+        ['serving.last_updated_at', new Date().toISOString()],
+      ]);
+    }
   });
 
   runBatch(events);
   return { inserted, updated };
 }
 
-export function writeSyncSummary(db: Database, summary: SyncSummary): void {
-  const upsert = db.query(
-    `INSERT INTO sync_state (key, value, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(key) DO UPDATE SET
-      value = excluded.value,
-      updated_at = CURRENT_TIMESTAMP`
-  );
+export async function rebuildRollups(dbPath: string): Promise<RebuildRollupsSummary> {
+  const startedAt = new Date().toISOString();
+  const db = await openDatabase(dbPath);
 
+  try {
+    let rawEventCount = 0;
+    let hourly = 0;
+    let daily = 0;
+    let monthly = 0;
+
+    const runBatch = db.transaction(() => {
+      rawEventCount = db.query<RollupCountRow>('SELECT COUNT(*) as count FROM raw_usage_events').get()?.count ?? 0;
+      clearRollupTables(db);
+      hourly = rebuildRollupTable(db, 'rollup_hourly', localBucketExpression('hourly'));
+      daily = rebuildRollupTable(db, 'rollup_daily', localBucketExpression('daily'));
+      monthly = rebuildRollupTable(db, 'rollup_monthly', localBucketExpression('monthly'));
+      const now = new Date().toISOString();
+      writeSyncValues(db, [
+        ['serving.schema_version', ROLLUP_SCHEMA_VERSION],
+        ['serving.last_rebuilt_at', now],
+        ['serving.last_updated_at', now],
+      ]);
+    });
+
+    runBatch();
+
+    return {
+      startedAt,
+      completedAt: new Date().toISOString(),
+      dbPath,
+      rawEventCount,
+      rollups: { hourly, daily, monthly },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+export function writeSyncSummary(db: Database, summary: SyncSummary): void {
   const entries: Array<[string, string]> = [
     ['last_run_started_at', summary.startedAt],
     ['last_run_completed_at', summary.completedAt],
@@ -323,34 +661,16 @@ export function writeSyncSummary(db: Database, summary: SyncSummary): void {
     entries.push([`source.${source.source}.message`, source.message ?? '']);
   }
 
-  const runBatch = db.transaction((pairs: Array<[string, string]>) => {
-    for (const [key, value] of pairs) {
-      upsert.run([key, value]);
-    }
-  });
-
-  runBatch(entries);
+  writeSyncValues(db, entries);
 }
 
 export function writeSyncError(db: Database, startedAt: string, error: Error): void {
-  const upsert = db.query(
-    `INSERT INTO sync_state (key, value, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(key) DO UPDATE SET
-      value = excluded.value,
-      updated_at = CURRENT_TIMESTAMP`
-  );
-
-  const entries: Array<[string, string]> = [
+  writeSyncValues(db, [
     ['last_run_started_at', startedAt],
     ['last_run_completed_at', new Date().toISOString()],
     ['last_run_status', 'error'],
     ['last_run_error', error.message],
-  ];
-
-  for (const [key, value] of entries) {
-    upsert.run([key, value]);
-  }
+  ]);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -362,11 +682,6 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-function readSyncValue(db: Database, key: string): string | null {
-  const row = db.query<{ value: string }>('SELECT value FROM sync_state WHERE key = ?').get([key]);
-  return row?.value ?? null;
-}
-
 function parseNullableInt(value: string | null): number | null {
   if (value === null) return null;
   const parsed = Number(value);
@@ -375,7 +690,7 @@ function parseNullableInt(value: string | null): number | null {
 
 function readRollupStatus(
   db: Database,
-  tableName: 'rollup_hourly' | 'rollup_daily' | 'rollup_monthly'
+  tableName: RollupTableName
 ): StatusSummary['rollups']['hourly'] {
   const countRow = db.query<RollupCountRow>(`SELECT COUNT(*) as count FROM ${tableName}`).get();
   const bounds = db
@@ -400,6 +715,11 @@ export async function readStatus(dbPath: string): Promise<StatusSummary> {
       rawEventCount: 0,
       firstEventAt: null,
       lastEventAt: null,
+      serving: {
+        schemaVersion: null,
+        lastRebuiltAt: null,
+        lastUpdatedAt: null,
+      },
       rollups: {
         hourly: { rowCount: 0, firstBucketStart: null, lastBucketStart: null },
         daily: { rowCount: 0, firstBucketStart: null, lastBucketStart: null },
@@ -438,6 +758,11 @@ export async function readStatus(dbPath: string): Promise<StatusSummary> {
       rawEventCount: countRow?.count ?? 0,
       firstEventAt: bounds?.first_timestamp ?? null,
       lastEventAt: bounds?.last_timestamp ?? null,
+      serving: {
+        schemaVersion: readSyncValue(db, 'serving.schema_version'),
+        lastRebuiltAt: readSyncValue(db, 'serving.last_rebuilt_at'),
+        lastUpdatedAt: readSyncValue(db, 'serving.last_updated_at'),
+      },
       rollups: {
         hourly: readRollupStatus(db, 'rollup_hourly'),
         daily: readRollupStatus(db, 'rollup_daily'),

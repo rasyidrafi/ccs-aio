@@ -10,13 +10,13 @@ import type {
   DashboardQuery,
   DashboardSourceBadge,
   DashboardTrendPoint,
-  DatePreset,
   TrendGranularity,
   TrendGranularityInput,
 } from "@/lib/types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_PORT = 8097;
+const SERVING_SCHEMA_VERSION = "2";
 
 interface DashboardWindow {
   label: string;
@@ -24,28 +24,16 @@ interface DashboardWindow {
   to: Date;
 }
 
-interface RollupRow {
+interface TrendRow {
   bucket_start: string;
-  provider_key: string;
-  model: string;
   request_count: number;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
   cost: number;
-  failed_count: number;
 }
 
-interface SummaryRow {
-  total_requests: number | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cache_read_tokens: number | null;
-  total_cost: number | null;
-  active_keys: number | null;
-}
-
-interface KeyRollupRow {
+interface KeySummaryRow {
   provider_key: string;
   requests: number;
   input_tokens: number;
@@ -54,26 +42,20 @@ interface KeyRollupRow {
   total_tokens: number;
   cost: number;
   models_used: string | null;
-}
-
-interface KeyMetaRow {
-  provider_key: string;
   last_used: string | null;
-  source_rank: number;
+  live_requests: number;
+  snapshot_requests: number;
 }
 
-interface ModelRow {
+interface ModelSummaryRow {
   model: string;
   requests: number;
   tokens: number;
   cost: number;
 }
 
-interface ModeRow {
-  live_count: number;
-  snapshot_count: number;
-  discovered_key_count: number;
-}
+type RollupGranularity = "hourly" | "daily" | "monthly";
+type RollupTableName = "rollup_hourly" | "rollup_daily" | "rollup_monthly";
 
 function getDatabasePath(): string {
   return path.join(homedir(), ".ccs-dashboard", "data", "usage-v2.db");
@@ -166,10 +148,13 @@ function resolveWindow(query: DashboardQuery, now = new Date()): DashboardWindow
   if (query.preset === "custom") {
     const from = query.from ? new Date(`${query.from}T00:00:00`) : today;
     const to = query.to ? new Date(`${query.to}T23:59:59.999`) : now;
+    if (from.getTime() > to.getTime()) {
+      return { label: "Custom range", from: to, to: from };
+    }
     return { label: "Custom range", from, to };
   }
 
-  return { label: "All time", from: new Date("2000-01-01T00:00:00.000Z"), to: now };
+  return { label: "All time", from: new Date("2000-01-01T00:00:00"), to: now };
 }
 
 function resolveGranularity(query: DashboardQuery, range: DashboardWindow): TrendGranularity {
@@ -189,56 +174,72 @@ function resolveGranularity(query: DashboardQuery, range: DashboardWindow): Tren
   return "yearly";
 }
 
-function toIsoDate(value: Date): string {
-  return value.toISOString();
-}
-
-function startOfUtcBucket(date: Date, granularity: TrendGranularity): Date {
+function startOfLocalBucket(date: Date, granularity: TrendGranularity | RollupGranularity): Date {
   const bucket = new Date(date);
   if (granularity === "hourly") {
-    bucket.setUTCMinutes(0, 0, 0);
+    bucket.setMinutes(0, 0, 0);
     return bucket;
   }
   if (granularity === "daily") {
-    bucket.setUTCHours(0, 0, 0, 0);
+    bucket.setHours(0, 0, 0, 0);
     return bucket;
   }
   if (granularity === "weekly") {
-    bucket.setUTCHours(0, 0, 0, 0);
-    const shift = (bucket.getUTCDay() + 6) % 7;
-    bucket.setUTCDate(bucket.getUTCDate() - shift);
+    bucket.setHours(0, 0, 0, 0);
+    const shift = (bucket.getDay() + 6) % 7;
+    bucket.setDate(bucket.getDate() - shift);
     return bucket;
   }
   if (granularity === "monthly") {
-    bucket.setUTCDate(1);
-    bucket.setUTCHours(0, 0, 0, 0);
+    bucket.setDate(1);
+    bucket.setHours(0, 0, 0, 0);
     return bucket;
   }
-  bucket.setUTCMonth(0, 1);
-  bucket.setUTCHours(0, 0, 0, 0);
+  bucket.setMonth(0, 1);
+  bucket.setHours(0, 0, 0, 0);
   return bucket;
 }
 
 function stepBucket(bucket: Date, granularity: TrendGranularity): Date {
   const next = new Date(bucket);
   if (granularity === "hourly") {
-    next.setUTCHours(next.getUTCHours() + 1);
+    next.setHours(next.getHours() + 1);
     return next;
   }
   if (granularity === "daily") {
-    next.setUTCDate(next.getUTCDate() + 1);
+    next.setDate(next.getDate() + 1);
     return next;
   }
   if (granularity === "weekly") {
-    next.setUTCDate(next.getUTCDate() + 7);
+    next.setDate(next.getDate() + 7);
     return next;
   }
   if (granularity === "monthly") {
-    next.setUTCMonth(next.getUTCMonth() + 1, 1);
+    next.setMonth(next.getMonth() + 1, 1);
     return next;
   }
-  next.setUTCFullYear(next.getUTCFullYear() + 1, 0, 1);
+  next.setFullYear(next.getFullYear() + 1, 0, 1);
   return next;
+}
+
+function formatLocalBucketStart(date: Date, granularity: RollupGranularity): string {
+  const bucket = startOfLocalBucket(date, granularity);
+  const year = bucket.getFullYear();
+  const month = `${bucket.getMonth() + 1}`.padStart(2, "0");
+  const day = `${bucket.getDate()}`.padStart(2, "0");
+  const hour = `${bucket.getHours()}`.padStart(2, "0");
+
+  if (granularity === "hourly") {
+    return `${year}-${month}-${day}T${hour}:00:00`;
+  }
+  if (granularity === "daily") {
+    return `${year}-${month}-${day}T00:00:00`;
+  }
+  return `${year}-${month}-01T00:00:00`;
+}
+
+function parseLocalBucket(value: string): Date {
+  return new Date(value);
 }
 
 function formatBucketLabel(bucket: Date, granularity: TrendGranularity): string {
@@ -247,42 +248,107 @@ function formatBucketLabel(bucket: Date, granularity: TrendGranularity): string 
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
-      timeZone: "UTC",
     }).format(bucket);
   }
   if (granularity === "daily") {
     return new Intl.DateTimeFormat("en-US", {
       month: "short",
       day: "numeric",
-      timeZone: "UTC",
     }).format(bucket);
   }
   if (granularity === "weekly") {
     const end = new Date(bucket);
-    end.setUTCDate(end.getUTCDate() + 6);
+    end.setDate(end.getDate() + 6);
     return `${new Intl.DateTimeFormat("en-US", {
       month: "short",
       day: "numeric",
-      timeZone: "UTC",
     }).format(bucket)}-${new Intl.DateTimeFormat("en-US", {
       day: "numeric",
-      timeZone: "UTC",
     }).format(end)}`;
   }
   if (granularity === "monthly") {
     return new Intl.DateTimeFormat("en-US", {
       month: "short",
       year: "2-digit",
-      timeZone: "UTC",
     }).format(bucket);
   }
-  return String(bucket.getUTCFullYear());
+  return String(bucket.getFullYear());
 }
 
-function getTrendSourceTable(granularity: TrendGranularity): "rollup_hourly" | "rollup_daily" | "rollup_monthly" {
-  if (granularity === "hourly") return "rollup_hourly";
-  if (granularity === "monthly" || granularity === "yearly") return "rollup_monthly";
-  return "rollup_daily";
+function resolveServingTable(query: DashboardQuery): { tableName: RollupTableName; tableGranularity: RollupGranularity } {
+  if (query.preset === "today") {
+    return { tableName: "rollup_hourly", tableGranularity: "hourly" };
+  }
+  if (query.preset === "year" || query.preset === "all") {
+    return { tableName: "rollup_monthly", tableGranularity: "monthly" };
+  }
+  return { tableName: "rollup_daily", tableGranularity: "daily" };
+}
+
+function resolveBucketExpression(granularity: TrendGranularity): string {
+  if (granularity === "hourly") {
+    return "strftime('%Y-%m-%dT%H:00:00', bucket_start)";
+  }
+  if (granularity === "daily") {
+    return "strftime('%Y-%m-%dT00:00:00', bucket_start)";
+  }
+  if (granularity === "monthly") {
+    return "strftime('%Y-%m-01T00:00:00', bucket_start)";
+  }
+  if (granularity === "yearly") {
+    return "strftime('%Y-01-01T00:00:00', bucket_start)";
+  }
+
+  return `strftime(
+    '%Y-%m-%dT00:00:00',
+    datetime(
+      bucket_start,
+      printf(
+        '-%d days',
+        (
+          CAST(strftime('%w', bucket_start) AS INTEGER) + 6
+        ) % 7
+      )
+    )
+  )`;
+}
+
+function buildSourceBadges(mode: "live" | "fallback" | "mixed"): DashboardSourceBadge[] {
+  if (mode === "live") {
+    return [{ label: "Live API", kind: "live" }];
+  }
+  if (mode === "mixed") {
+    return [{ label: "Live + stored history", kind: "warning" }];
+  }
+  return [{ label: "Stored history", kind: "fallback" }];
+}
+
+function inferKeyMeta(providerKey: string): Pick<DashboardKeyRow, "displayName" | "fingerprint" | "maskedKey" | "providerLabel"> {
+  const value = providerKey.replace(/^api-key:/, "");
+  const fingerprint = value.slice(-4).toUpperCase() || "KEY";
+  const providerLabel = value.includes("claude")
+    ? "Claude"
+    : value.includes("gemini")
+      ? "Gemini"
+      : value.includes("codex") || value.includes("gpt")
+        ? "Codex"
+        : "API key";
+
+  return {
+    displayName: value
+      .split(/[-_]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" "),
+    fingerprint,
+    maskedKey: `sk-...${fingerprint}`,
+    providerLabel,
+  };
+}
+
+function readSyncValue(db: DatabaseSync, key: string): string | null {
+  const row = db.prepare("SELECT value FROM sync_state WHERE key = ?").get(key) as { value?: string } | undefined;
+  return typeof row?.value === "string" ? row.value : null;
 }
 
 function emptyPayload(
@@ -312,44 +378,13 @@ function emptyPayload(
       mode: "fallback",
       managementUrl,
       discoveredKeyCount: 0,
+      lastUpdatedAt: null,
       note,
       badges: [{ label: "Stored history", kind: "fallback" }],
     },
     trend: [],
     keys: [],
     models: [],
-  };
-}
-
-function buildSourceBadges(mode: "live" | "fallback" | "mixed"): DashboardSourceBadge[] {
-  if (mode === "live") {
-    return [{ label: "Live API", kind: "live" }];
-  }
-  if (mode === "mixed") {
-    return [{ label: "Live + stored history", kind: "warning" }];
-  }
-  return [{ label: "Stored history", kind: "fallback" }];
-}
-
-function inferKeyMeta(providerKey: string): Pick<DashboardKeyRow, "displayName" | "fingerprint" | "maskedKey" | "providerLabel"> {
-  const value = providerKey.replace(/^api-key:/, "");
-  const fingerprint = value.slice(-4).toUpperCase() || "KEY";
-  const providerLabel = value.includes("claude")
-    ? "Claude"
-    : value.includes("gemini")
-      ? "Gemini"
-      : value.includes("codex") || value.includes("gpt")
-        ? "Codex"
-        : "API key";
-  return {
-    displayName: value
-      .split(/[-_]+/)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" "),
-    fingerprint,
-    maskedKey: `sk-...${fingerprint}`,
-    providerLabel,
   };
 }
 
@@ -369,47 +404,70 @@ export async function getDashboardPayload(query: DashboardQuery): Promise<Dashbo
   }
 
   try {
+    const servingSchemaVersion = readSyncValue(db, "serving.schema_version");
+    if (servingSchemaVersion !== SERVING_SCHEMA_VERSION) {
+      return emptyPayload(
+        query,
+        managementUrl,
+        "Serving tables are not ready for this dashboard version. Run ccs-backup rebuild-rollups once."
+      );
+    }
+
     const range = resolveWindow(query);
     const resolvedGranularity = resolveGranularity(query, range);
-    const rangeFromIso = toIsoDate(range.from);
-    const rangeToIso = toIsoDate(range.to);
+    const { tableName, tableGranularity } = resolveServingTable(query);
+    const rangeFromBucket = formatLocalBucketStart(range.from, tableGranularity);
+    const rangeToBucket = formatLocalBucketStart(range.to, tableGranularity);
 
-    const summary = db
-      .prepare(
-        `SELECT
-          SUM(request_count) as total_requests,
-          SUM(input_tokens) as input_tokens,
-          SUM(output_tokens) as output_tokens,
-          SUM(cache_read_tokens) as cache_read_tokens,
-          SUM(cost) as total_cost,
-          COUNT(DISTINCT provider_key) as active_keys
-        FROM rollup_daily
-        WHERE bucket_start BETWEEN ? AND ?`
-      )
-      .get(rangeFromIso, rangeToIso) as unknown as SummaryRow;
+    const bucketExpression = resolveBucketExpression(resolvedGranularity);
+    const trendRows = db.prepare(
+      `SELECT
+        ${bucketExpression} as bucket_start,
+        SUM(request_count) as request_count,
+        SUM(input_tokens) as input_tokens,
+        SUM(output_tokens) as output_tokens,
+        SUM(cache_read_tokens) as cache_read_tokens,
+        SUM(cost) as cost
+      FROM ${tableName}
+      WHERE bucket_start BETWEEN ? AND ?
+      GROUP BY bucket_start
+      ORDER BY bucket_start ASC`
+    ).all(rangeFromBucket, rangeToBucket) as unknown as TrendRow[];
 
-    const trendSourceTable = getTrendSourceTable(resolvedGranularity);
-    const trendRows = db
-      .prepare(
-        `SELECT
-          bucket_start,
-          provider_key,
-          model,
-          request_count,
-          input_tokens,
-          output_tokens,
-          cache_read_tokens,
-          cost,
-          failed_count
-        FROM ${trendSourceTable}
-        WHERE bucket_start BETWEEN ? AND ?
-        ORDER BY bucket_start ASC`
-      )
-      .all(rangeFromIso, rangeToIso) as unknown as RollupRow[];
+    const keyRows = db.prepare(
+      `SELECT
+        provider_key,
+        SUM(request_count) as requests,
+        SUM(input_tokens) as input_tokens,
+        SUM(output_tokens) as output_tokens,
+        SUM(cache_read_tokens) as cache_tokens,
+        SUM(input_tokens + output_tokens + cache_read_tokens) as total_tokens,
+        SUM(cost) as cost,
+        GROUP_CONCAT(DISTINCT model) as models_used,
+        MAX(last_event_at) as last_used,
+        SUM(live_request_count) as live_requests,
+        SUM(snapshot_request_count) as snapshot_requests
+      FROM ${tableName}
+      WHERE bucket_start BETWEEN ? AND ?
+      GROUP BY provider_key
+      ORDER BY cost DESC, requests DESC`
+    ).all(rangeFromBucket, rangeToBucket) as unknown as KeySummaryRow[];
+
+    const modelRows = db.prepare(
+      `SELECT
+        model,
+        SUM(request_count) as requests,
+        SUM(input_tokens + output_tokens + cache_read_tokens) as tokens,
+        SUM(cost) as cost
+      FROM ${tableName}
+      WHERE bucket_start BETWEEN ? AND ?
+      GROUP BY model
+      ORDER BY cost DESC, requests DESC`
+    ).all(rangeFromBucket, rangeToBucket) as unknown as ModelSummaryRow[];
 
     const trendMap = new Map<string, DashboardTrendPoint>();
     for (
-      let bucket = startOfUtcBucket(range.from, resolvedGranularity);
+      let bucket = startOfLocalBucket(range.from, resolvedGranularity);
       bucket.getTime() <= range.to.getTime();
       bucket = stepBucket(bucket, resolvedGranularity)
     ) {
@@ -427,54 +485,18 @@ export async function getDashboardPayload(query: DashboardQuery): Promise<Dashbo
     }
 
     for (const row of trendRows) {
-      const bucketKey = startOfUtcBucket(new Date(row.bucket_start), resolvedGranularity).toISOString();
+      const bucketKey = startOfLocalBucket(parseLocalBucket(row.bucket_start), resolvedGranularity).toISOString();
       const bucket = trendMap.get(bucketKey);
       if (!bucket) continue;
-      bucket.requests += row.request_count;
-      bucket.inputTokens += row.input_tokens;
-      bucket.outputTokens += row.output_tokens;
-      bucket.cacheReadTokens += row.cache_read_tokens;
-      bucket.totalTokens += row.input_tokens + row.output_tokens + row.cache_read_tokens;
-      bucket.cost += row.cost;
+      bucket.requests = row.request_count;
+      bucket.inputTokens = row.input_tokens;
+      bucket.outputTokens = row.output_tokens;
+      bucket.cacheReadTokens = row.cache_read_tokens;
+      bucket.totalTokens = row.input_tokens + row.output_tokens + row.cache_read_tokens;
+      bucket.cost = row.cost;
     }
 
-    const keyRows = db
-      .prepare(
-        `SELECT
-          provider_key,
-          SUM(request_count) as requests,
-          SUM(input_tokens) as input_tokens,
-          SUM(output_tokens) as output_tokens,
-          SUM(cache_read_tokens) as cache_tokens,
-          SUM(input_tokens + output_tokens + cache_read_tokens) as total_tokens,
-          SUM(cost) as cost,
-          GROUP_CONCAT(DISTINCT model) as models_used
-        FROM rollup_daily
-        WHERE bucket_start BETWEEN ? AND ?
-        GROUP BY provider_key
-        ORDER BY cost DESC, requests DESC`
-      )
-      .all(rangeFromIso, rangeToIso) as unknown as KeyRollupRow[];
-
-    const keyMetaRows = db
-      .prepare(
-        `SELECT
-          provider_key,
-          MAX(timestamp) as last_used,
-          MAX(CASE
-            WHEN live_seen = 1 THEN 2
-            WHEN snapshot_seen = 1 THEN 1
-            ELSE 0
-          END) as source_rank
-        FROM raw_usage_events
-        WHERE timestamp BETWEEN ? AND ?
-        GROUP BY provider_key`
-      )
-      .all(rangeFromIso, rangeToIso) as unknown as KeyMetaRow[];
-    const keyMetaMap = new Map(keyMetaRows.map((row) => [row.provider_key, row]));
-
     const keys: DashboardKeyRow[] = keyRows.map((row) => {
-      const meta = keyMetaMap.get(row.provider_key);
       const inferred = inferKeyMeta(row.provider_key);
       return {
         id: row.provider_key,
@@ -486,44 +508,20 @@ export async function getDashboardPayload(query: DashboardQuery): Promise<Dashbo
         totalTokens: row.total_tokens,
         cost: row.cost,
         modelsUsed: row.models_used ? row.models_used.split(",").filter(Boolean).sort() : [],
-        lastUsed: meta?.last_used ?? null,
-        sourceState: (meta?.source_rank ?? 0) >= 2 ? "live" : "fallback",
+        lastUsed: row.last_used,
+        sourceState: row.live_requests > 0 ? "live" : "fallback",
       };
     });
 
-    const models = db
-      .prepare(
-        `SELECT
-          model,
-          SUM(request_count) as requests,
-          SUM(input_tokens + output_tokens + cache_read_tokens) as tokens,
-          SUM(cost) as cost
-        FROM rollup_daily
-        WHERE bucket_start BETWEEN ? AND ?
-        GROUP BY model
-        ORDER BY cost DESC, requests DESC`
-      )
-      .all(rangeFromIso, rangeToIso) as unknown as DashboardModelRow[];
-
-    const modeRow = db
-      .prepare(
-        `SELECT
-          SUM(CASE WHEN live_seen = 1 THEN 1 ELSE 0 END) as live_count,
-          SUM(CASE WHEN snapshot_seen = 1 THEN 1 ELSE 0 END) as snapshot_count,
-          COUNT(DISTINCT provider_key) as discovered_key_count
-        FROM raw_usage_events
-        WHERE timestamp BETWEEN ? AND ?`
-      )
-      .get(rangeFromIso, rangeToIso) as unknown as ModeRow;
-
+    const hasLive = keyRows.some((row) => row.live_requests > 0);
+    const hasSnapshot = keyRows.some((row) => row.snapshot_requests > 0);
     const mode: "live" | "fallback" | "mixed" =
-      (modeRow.live_count ?? 0) > 0 && (modeRow.snapshot_count ?? 0) > 0
-        ? "mixed"
-        : (modeRow.live_count ?? 0) > 0
-          ? "live"
-          : "fallback";
+      hasLive && hasSnapshot ? "mixed" : hasLive ? "live" : "fallback";
 
-    const hasAnyData = (summary?.total_requests ?? 0) > 0;
+    const totalRequests = keys.reduce((sum, row) => sum + row.requests, 0);
+    const totalTokens = keys.reduce((sum, row) => sum + row.totalTokens, 0);
+    const totalCost = keys.reduce((sum, row) => sum + row.cost, 0);
+    const lastUpdatedAt = readSyncValue(db, "serving.last_updated_at");
 
     return {
       generatedAt: new Date().toISOString(),
@@ -536,24 +534,25 @@ export async function getDashboardPayload(query: DashboardQuery): Promise<Dashbo
         resolvedGranularity,
       },
       summary: {
-        totalRequests: summary?.total_requests ?? 0,
-        totalTokens:
-          (summary?.input_tokens ?? 0) + (summary?.output_tokens ?? 0) + (summary?.cache_read_tokens ?? 0),
-        totalCost: summary?.total_cost ?? 0,
-        activeKeys: summary?.active_keys ?? 0,
+        totalRequests,
+        totalTokens,
+        totalCost,
+        activeKeys: keys.length,
       },
       source: {
         mode,
         managementUrl,
-        discoveredKeyCount: modeRow?.discovered_key_count ?? 0,
-        note: hasAnyData
-          ? "Served from ~/.ccs-dashboard/data/usage-v2.db rollups and raw event metadata."
-          : "Database is available but there is no usage data for the selected range.",
+        discoveredKeyCount: keys.length,
+        lastUpdatedAt,
+        note:
+          keys.length > 0
+            ? `Served entirely from local serving tables in ~/.ccs-dashboard/data/usage-v2.db. Last rollup update: ${lastUpdatedAt ?? "unknown"}.`
+            : "Database is available but there is no usage data for the selected range.",
         badges: buildSourceBadges(mode),
       },
       trend: Array.from(trendMap.values()),
       keys,
-      models: models.map((row) => ({
+      models: modelRows.map((row) => ({
         model: row.model,
         requests: row.requests,
         tokens: row.tokens,
