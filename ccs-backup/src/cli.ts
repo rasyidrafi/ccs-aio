@@ -2,6 +2,7 @@ import { resolveConfig } from '@/config';
 import { readStatus, rebuildRollups } from '@/db';
 import { runBackfillOldData } from '@/backfill';
 import { runSync } from '@/sync';
+import type { SyncSourceMode } from '@/sources';
 
 function readFlag(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -14,9 +15,22 @@ async function main(): Promise<void> {
   const ccsDir = readFlag('--ccs-dir');
   const dbPath = readFlag('--db-path');
   const sourceDir = readFlag('--source-dir');
+  const sourceMode = readFlag('--source') as SyncSourceMode | undefined;
 
   if (command === 'sync') {
-    const summary = await runSync({ ccsDir, dbPath });
+    const summary = await runSync({ ccsDir, dbPath, sourceMode: sourceMode ?? 'all' });
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  if (command === 'sync-live') {
+    const summary = await runSync({ ccsDir, dbPath, sourceMode: 'live' });
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  if (command === 'sync-snapshot') {
+    const summary = await runSync({ ccsDir, dbPath, sourceMode: 'snapshot' });
     console.log(JSON.stringify(summary, null, 2));
     return;
   }
@@ -42,7 +56,7 @@ async function main(): Promise<void> {
   }
 
   console.error(
-    'Usage: bun run src/cli.ts <sync|status|backfill-old-data|rebuild-rollups> [--ccs-dir <path>] [--db-path <path>] [--source-dir <path>]'
+    'Usage: bun run src/cli.ts <sync|sync-live|sync-snapshot|status|backfill-old-data|rebuild-rollups> [--ccs-dir <path>] [--db-path <path>] [--source-dir <path>] [--source <live|snapshot|all>]'
   );
   process.exitCode = 1;
 }

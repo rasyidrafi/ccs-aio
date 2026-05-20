@@ -1,0 +1,11 @@
+[Unit]
+Description=Run CCS durable snapshot reconciliation every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=ccs-backup-snapshot.service
+
+[Install]
+WantedBy=timers.target

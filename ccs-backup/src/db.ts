@@ -646,6 +646,7 @@ export function writeSyncSummary(db: Database, summary: SyncSummary): void {
     ['last_run_started_at', summary.startedAt],
     ['last_run_completed_at', summary.completedAt],
     ['last_run_status', 'success'],
+    ['last_run_error', ''],
     ['last_run_db_path', summary.dbPath],
     ['last_run_ccs_dir', summary.ccsDir],
     ['last_run_inserted', String(summary.inserted)],

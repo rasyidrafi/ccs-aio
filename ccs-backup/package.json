@@ -5,6 +5,8 @@
   "packageManager": "bun@1.3.9",
   "scripts": {
     "sync": "bun run src/cli.ts sync",
+    "sync-live": "bun run src/cli.ts sync-live",
+    "sync-snapshot": "bun run src/cli.ts sync-snapshot",
     "status": "bun run src/cli.ts status",
     "backfill-old-data": "bun run src/cli.ts backfill-old-data",
     "rebuild-rollups": "bun run src/cli.ts rebuild-rollups",

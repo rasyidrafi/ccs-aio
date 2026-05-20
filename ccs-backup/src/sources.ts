@@ -4,6 +4,8 @@ import type { ResolvedConfig } from '@/config';
 import { mergeEvents, normalizeLiveResponse, normalizeSnapshotDetails } from '@/events';
 import type { SyncSourceResult, UsageEventRecord } from '@/types';
 
+export type SyncSourceMode = 'live' | 'snapshot' | 'all';
+
 interface SnapshotPayload {
   details?: Array<{
     provider?: string;

@@ -1,0 +1,13 @@
+[Unit]
+Description=CCS durable snapshot usage reconciliation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__WORKDIR__
+ExecStart=/bin/bash -lc 'mkdir -p "$HOME/.ccs-dashboard/run" && exec /usr/bin/flock -w 25 "$HOME/.ccs-dashboard/run/ccs-backup.lock" __BUN__ run src/cli.ts sync-snapshot'
+Nice=10
+
+[Install]
+WantedBy=default.target

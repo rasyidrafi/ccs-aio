@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CCS durable live usage sync every 30 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+Unit=ccs-backup-live.service
+
+[Install]
+WantedBy=timers.target
