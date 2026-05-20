@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { Activity, AlertTriangle, Clock3, KeyRound, RefreshCw, ShieldAlert } from "lucide-react"
+import { Activity, AlertTriangle, Clock3, KeyRound, RefreshCw, ShieldAlert, TimerReset } from "lucide-react"
 
 import { ConsoleTabs } from "@/components/console-tabs"
 import { ThemeSelect } from "@/components/theme-select"
@@ -92,6 +92,26 @@ function getStatusLabel(status: LimitsAccountRow["status"]): string {
   return "Error"
 }
 
+function getPlanBadgeVariant(planType: string | null): "secondary" | "outline" | "destructive" {
+  const value = planType?.toLowerCase() ?? ""
+  if (value === "plus") return "secondary"
+  if (value === "free") return "destructive"
+  if (value === "business") return "outline"
+  return "outline"
+}
+
+function getPlanBadgeClassName(planType: string | null): string {
+  const value = planType?.toLowerCase() ?? ""
+  if (value === "plus") return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
+  if (value === "business") return "border-sky-500/40 bg-sky-500/15 text-sky-200"
+  return ""
+}
+
+function formatPlanLabel(planType: string | null): string {
+  if (!planType) return "Unknown"
+  return planType.charAt(0).toUpperCase() + planType.slice(1)
+}
+
 function RefreshScrim({ label = "Refreshing data..." }: { label?: string }) {
   return (
     <div className="pointer-events-none absolute inset-0 z-20 flex items-start justify-end rounded-[inherit] bg-background/40 p-3 backdrop-blur-[1.5px]">
@@ -121,44 +141,160 @@ function LoadingSummaryGrid() {
   )
 }
 
+function LoadingLimitsHeader() {
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div className="min-w-0 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Skeleton className="h-8 w-40 sm:h-9 sm:w-48" />
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-2">
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-4 w-28" />
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 sm:grid sm:grid-cols-[minmax(0,156px)_minmax(0,180px)] lg:flex lg:flex-row lg:items-center">
+          <div className="flex min-w-0 items-center gap-2 sm:col-span-2 lg:hidden">
+            <div className="w-12 shrink-0 text-xs font-medium text-muted-foreground">Page</div>
+            <Skeleton className="h-8 min-w-0 flex-1" />
+          </div>
+          <div className="hidden lg:block">
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-9 w-[142px]" />
+              <Skeleton className="h-9 w-[102px]" />
+            </div>
+          </div>
+          <div className="flex min-w-0 items-center gap-2 sm:block">
+            <div className="w-12 shrink-0 text-xs font-medium text-muted-foreground sm:hidden">Theme</div>
+            <Skeleton className="h-8 min-w-0 flex-1 sm:h-9 sm:w-full lg:w-[196px]" />
+          </div>
+          <div className="flex min-w-0 items-center gap-2 sm:block">
+            <div className="w-12 shrink-0 text-xs font-medium text-muted-foreground sm:hidden">Refresh</div>
+            <Skeleton className="h-8 min-w-0 flex-1 sm:h-9 sm:w-full lg:w-[116px]" />
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function LoadingLimitsAlerts() {
+  return (
+    <div className="space-y-3">
+      {Array.from({ length: 3 }).map((_, index) => (
+        <div key={index} className="rounded-xl border border-border/70 bg-card/95 p-4">
+          <div className="space-y-2">
+            <Skeleton className="h-5 w-40" />
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-4 w-full max-w-[420px]" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function LoadingInventorySection() {
+  return (
+    <section className="space-y-4">
+      <div className="space-y-2">
+        <Skeleton className="h-6 w-24" />
+        <Skeleton className="h-4 w-64 max-w-full" />
+      </div>
+      <LoadingSummaryGrid />
+    </section>
+  )
+}
+
+function LoadingLimitsTable() {
+  return (
+    <div className="rounded-lg border border-border/70">
+      <div className="border-b border-border/70 px-4 py-3">
+        <div className="grid min-w-[1260px] grid-cols-[44px_minmax(220px,1.5fr)_88px_92px_minmax(180px,1fr)_minmax(180px,1fr)_88px_88px_88px_110px] gap-4">
+          {Array.from({ length: 10 }).map((_, index) => (
+            <Skeleton key={index} className="h-4 w-full max-w-full" />
+          ))}
+        </div>
+      </div>
+      <div>
+        {Array.from({ length: 6 }).map((_, rowIndex) => (
+          <div
+            key={rowIndex}
+            className="grid min-w-[1260px] grid-cols-[44px_minmax(220px,1.5fr)_88px_92px_minmax(180px,1fr)_minmax(180px,1fr)_88px_88px_88px_110px] gap-4 border-b border-border/70 px-4 py-4 last:border-b-0"
+          >
+            <Skeleton className="h-4 w-6 justify-self-center" />
+            <div className="min-w-0 space-y-2">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-3 w-24" />
+            </div>
+            <Skeleton className="h-6 w-16 rounded-full" />
+            <Skeleton className="h-4 w-16" />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Skeleton className="h-3 w-10" />
+                <Skeleton className="h-3 w-8" />
+              </div>
+              <Skeleton className="h-2.5 w-full" />
+              <Skeleton className="h-3 w-24" />
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Skeleton className="h-3 w-12" />
+                <Skeleton className="h-3 w-8" />
+              </div>
+              <Skeleton className="h-2.5 w-full" />
+              <Skeleton className="h-3 w-24" />
+            </div>
+            <Skeleton className="h-4 w-14 justify-self-end" />
+            <Skeleton className="h-4 w-10 justify-self-end" />
+            <Skeleton className="h-4 w-10 justify-self-end" />
+            <Skeleton className="h-4 w-20" />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function LimitsPageSkeleton() {
   return (
     <div className="space-y-4">
-      <Card className="border-border/70 bg-card/95">
-        <CardHeader className="gap-4">
-          <Skeleton className="h-4 w-20" />
-          <Skeleton className="h-10 w-56" />
-          <Skeleton className="h-5 w-full max-w-xl" />
-          <div className="grid gap-2 sm:grid-cols-2">
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
-            <Skeleton className="h-10 w-full" />
+      <LoadingLimitsHeader />
+      <section className="space-y-4">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-36" />
+            <Skeleton className="h-4 w-72 max-w-full" />
           </div>
-        </CardHeader>
-      </Card>
-      <LoadingSummaryGrid />
-      <div className="grid gap-4 2xl:grid-cols-[minmax(0,0.9fr)_minmax(360px,1.1fr)]">
-        <Card className="border-border/70 bg-card/95">
-          <CardHeader>
-            <Skeleton className="h-4 w-24" />
-            <Skeleton className="h-8 w-40" />
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {Array.from({ length: 3 }).map((_, index) => (
-              <Skeleton key={index} className="h-24 w-full" />
-            ))}
-          </CardContent>
-        </Card>
+          <Skeleton className="h-6 w-32 rounded-full" />
+        </div>
+        <LoadingSummaryGrid />
+      </section>
+      <LoadingInventorySection />
+      <section className="space-y-4">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-32" />
+          <Skeleton className="h-4 w-64 max-w-full" />
+        </div>
+        <LoadingLimitsAlerts />
+      </section>
+      <section className="space-y-4">
+        <div className="space-y-2">
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-4 w-72 max-w-full" />
+        </div>
         <Card className={cn(TABLE_PANEL_HEIGHT, "border-border/70 bg-card/95")}>
           <CardHeader>
-            <Skeleton className="h-4 w-20" />
-            <Skeleton className="h-8 w-36" />
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-8 w-32" />
           </CardHeader>
-          <CardContent>
-            <Skeleton className="h-[460px] w-full" />
+          <CardContent className="min-h-0 flex-1">
+            <LoadingLimitsTable />
           </CardContent>
         </Card>
-      </div>
+      </section>
     </div>
   )
 }
@@ -253,11 +389,11 @@ function LimitsOverview({
 
 function LimitsAlertCard({ alert }: { alert: LimitsAlert }) {
   return (
-    <Alert variant={getAlertVariant(alert.severity)} className="border-border/70">
+    <Alert variant={getAlertVariant(alert.severity)} className="border-border/70 bg-card/95">
       <AlertTriangle className="size-4" />
-      <AlertTitle>{alert.title}</AlertTitle>
+      <AlertTitle>{alert.accountLabel}</AlertTitle>
       <AlertDescription className="space-y-1">
-        <div className="font-medium">{alert.accountLabel}</div>
+        <div className="font-medium">{alert.title}</div>
         <div>{alert.message}</div>
       </AlertDescription>
     </Alert>
@@ -288,22 +424,20 @@ function QuotaCell({ label, remaining, used, resetAfterSeconds }: {
 
 function AlertsPanel({ limits, refreshing }: { limits: LimitsPayload; refreshing: boolean }) {
   return (
-    <Card className="relative border-border/70 bg-card/95">
+    <div className="relative">
       {refreshing ? <RefreshScrim /> : null}
-      <CardHeader>
-        <CardDescription>Priority board</CardDescription>
-        <CardTitle>Use-before-reset alerts</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
+      <div className="space-y-3">
         {limits.alerts.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-border p-6 text-sm text-muted-foreground">
-            No reset urgency right now.
-          </div>
+          <Alert className="border-border/70 bg-card/95">
+            <AlertTriangle className="size-4" />
+            <AlertTitle>No reset urgency</AlertTitle>
+            <AlertDescription>No reset urgency right now.</AlertDescription>
+          </Alert>
         ) : (
           limits.alerts.map((alert) => <LimitsAlertCard key={alert.id} alert={alert} />)
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   )
 }
 
@@ -316,31 +450,33 @@ function LimitsTable({ limits, refreshing }: { limits: LimitsPayload; refreshing
         <CardTitle>Quota runway</CardTitle>
       </CardHeader>
       <CardContent className="min-h-0 flex-1">
-        <ScrollArea className="h-[520px] w-full rounded-md">
-          <Table>
-            <TableHeader className="bg-card/95">
-              <TableRow>
-                <TableHead>Account</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Plan</TableHead>
-                <TableHead>5h</TableHead>
-                <TableHead>Weekly</TableHead>
-                <TableHead>Reset</TableHead>
-                <TableHead className="text-right">Success</TableHead>
-                <TableHead className="text-right">Failures</TableHead>
-                <TableHead>Updated</TableHead>
+        <ScrollArea className="h-full rounded-lg border border-border/70">
+          <Table className="min-w-[1260px]">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="sticky top-0 z-10 bg-card text-center">No</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">Account</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">Status</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">Plan</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">5h</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">Weekly</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card w-[88px] text-center">Reset</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card w-[88px] text-center">Success</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card w-[88px] text-center">Failures</TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">Updated</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {limits.accounts.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="h-32 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={10} className="h-32 text-center text-sm text-muted-foreground">
                     No Codex accounts were discovered.
                   </TableCell>
                 </TableRow>
               ) : (
-                limits.accounts.map((account) => (
+                limits.accounts.map((account, index) => (
                   <TableRow key={account.id} className="align-top">
+                    <TableCell className="text-center font-mono text-muted-foreground">{index + 1}</TableCell>
                     <TableCell className="min-w-[220px]">
                       <div className="space-y-1">
                         <div className="font-medium">{account.displayName}</div>
@@ -351,7 +487,14 @@ function LimitsTable({ limits, refreshing }: { limits: LimitsPayload; refreshing
                     <TableCell>
                       <Badge variant={getStatusBadgeVariant(account.status)}>{getStatusLabel(account.status)}</Badge>
                     </TableCell>
-                    <TableCell>{account.planType ?? "Unknown"}</TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={getPlanBadgeVariant(account.planType)}
+                        className={getPlanBadgeClassName(account.planType)}
+                      >
+                        {formatPlanLabel(account.planType)}
+                      </Badge>
+                    </TableCell>
                     <TableCell>
                       <QuotaCell
                         label="5 hour"
@@ -368,11 +511,11 @@ function LimitsTable({ limits, refreshing }: { limits: LimitsPayload; refreshing
                         resetAfterSeconds={account.weekly?.resetAfterSeconds ?? null}
                       />
                     </TableCell>
-                    <TableCell className="min-w-[120px] text-sm text-muted-foreground">
+                    <TableCell className="w-[88px] text-center text-sm text-muted-foreground tabular-nums">
                       {account.weekly ? formatRelativeSeconds(account.weekly.resetAfterSeconds) : "Unknown"}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">{formatNumber(account.successCount)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{formatNumber(account.failureCount)}</TableCell>
+                    <TableCell className="w-[88px] text-center tabular-nums">{formatNumber(account.successCount)}</TableCell>
+                    <TableCell className="w-[88px] text-center tabular-nums">{formatNumber(account.failureCount)}</TableCell>
                     <TableCell className="min-w-[110px] text-sm text-muted-foreground">
                       {formatDateTime(account.updatedAt)}
                     </TableCell>
@@ -509,38 +652,58 @@ export function LimitsClient() {
                   </div>
                 </section>
 
-                <div className="grid gap-4 2xl:grid-cols-[minmax(0,0.9fr)_minmax(360px,1.1fr)]">
-                  <div className="space-y-4">
-                    <AlertsPanel limits={limits} refreshing={isRefreshing} />
-                    <Card className="relative border-border/70 bg-card/95">
-                      {isRefreshing ? <RefreshScrim /> : null}
-                      <CardHeader>
-                        <CardDescription>Inventory</CardDescription>
-                        <CardTitle>Status mix</CardTitle>
-                      </CardHeader>
-                      <CardContent className="grid gap-3 sm:grid-cols-2">
-                        <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-3">
-                          <div className="text-xs font-medium text-muted-foreground">Updated</div>
-                          <div className="mt-2 text-sm font-medium">{formatDateTime(limits.generatedAt)}</div>
-                        </div>
-                        <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-3">
-                          <div className="text-xs font-medium text-muted-foreground">Healthy</div>
-                          <div className="mt-2 text-2xl font-semibold">{formatNumber(healthyCount)}</div>
-                        </div>
-                        <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-3">
-                          <div className="text-xs font-medium text-muted-foreground">Expired</div>
-                          <div className="mt-2 text-2xl font-semibold">{formatNumber(expiredCount)}</div>
-                        </div>
-                        <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-3">
-                          <div className="text-xs font-medium text-muted-foreground">Errors</div>
-                          <div className="mt-2 text-2xl font-semibold">{formatNumber(errorCount)}</div>
-                        </div>
-                      </CardContent>
-                    </Card>
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-lg font-semibold tracking-tight">Inventory</h2>
+                    <p className="text-sm text-muted-foreground">Status mix and latest snapshot.</p>
                   </div>
+                  <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-4">
+                    <SummaryCard
+                      title="Latest snapshot"
+                      value={formatDateTime(limits.generatedAt)}
+                      detail="Last successful quota snapshot."
+                      icon={TimerReset}
+                      refreshing={isRefreshing}
+                    />
+                    <SummaryCard
+                      title="Healthy"
+                      value={formatNumber(healthyCount)}
+                      detail="Accounts returning live quota normally."
+                      icon={Activity}
+                      refreshing={isRefreshing}
+                    />
+                    <SummaryCard
+                      title="Expired"
+                      value={formatNumber(expiredCount)}
+                      detail="Accounts with expired or inactive quota state."
+                      icon={Clock3}
+                      refreshing={isRefreshing}
+                    />
+                    <SummaryCard
+                      title="Errors"
+                      value={formatNumber(errorCount)}
+                      detail="Accounts failing quota inspection."
+                      icon={ShieldAlert}
+                      refreshing={isRefreshing}
+                    />
+                  </div>
+                </section>
 
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-lg font-semibold tracking-tight">Priority board</h2>
+                    <p className="text-sm text-muted-foreground">Accounts that should be used before their quota resets.</p>
+                  </div>
+                  <AlertsPanel limits={limits} refreshing={isRefreshing} />
+                </section>
+
+                <section className="space-y-4">
+                  <div>
+                    <h2 className="text-lg font-semibold tracking-tight">Registered accounts</h2>
+                    <p className="text-sm text-muted-foreground">Quota runway across every discovered Codex account.</p>
+                  </div>
                   <LimitsTable limits={limits} refreshing={isRefreshing} />
-                </div>
+                </section>
               </>
             ) : null}
           </>
