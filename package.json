@@ -1,0 +1,9 @@
+{
+  "name": "ccs-aio",
+  "private": true,
+  "scripts": {
+    "dev": "cd ccs-dashboard && bun dev",
+    "build": "cd ccs-dashboard && bun run build",
+    "start": "cd ccs-dashboard && bun start"
+  }
+}
