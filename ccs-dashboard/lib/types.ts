@@ -1,4 +1,4 @@
-export type DatePreset = "all" | "today" | "week" | "month" | "year" | "custom";
+export type DatePreset = "all" | "today" | "yesterday" | "week" | "lastWeek" | "month" | "lastMonth" | "year" | "custom";
 export type TrendGranularity = "hourly" | "daily" | "weekly" | "monthly" | "yearly";
 export type TrendGranularityInput = TrendGranularity | "auto";
 export type RowSourceState = "live" | "fallback" | "config";

@@ -103,8 +103,11 @@ export function parseDashboardQuery(params: URLSearchParams): DashboardQuery {
   if (
     preset === "all" ||
     preset === "today" ||
+    preset === "yesterday" ||
     preset === "week" ||
+    preset === "lastWeek" ||
     preset === "month" ||
+    preset === "lastMonth" ||
     preset === "year" ||
     preset === "custom"
   ) {
@@ -143,6 +146,13 @@ function resolveWindow(query: DashboardQuery, now = new Date()): DashboardWindow
     return { label: "Today", from: today, to: now };
   }
 
+  if (query.preset === "yesterday") {
+    const from = new Date(today);
+    from.setDate(from.getDate() - 1);
+    const to = new Date(today.getTime() - 1);
+    return { label: "Yesterday", from, to };
+  }
+
   if (query.preset === "week") {
     const from = new Date(today);
     const shift = (from.getDay() + 6) % 7;
@@ -150,10 +160,27 @@ function resolveWindow(query: DashboardQuery, now = new Date()): DashboardWindow
     return { label: "This week", from, to: now };
   }
 
+  if (query.preset === "lastWeek") {
+    const to = new Date(today.getTime() - 1);
+    const from = new Date(today);
+    const shift = (from.getDay() + 6) % 7;
+    from.setDate(from.getDate() - shift - 7);
+    return { label: "Last week", from, to };
+  }
+
   if (query.preset === "month") {
     const from = new Date(today);
     from.setDate(1);
     return { label: "This month", from, to: now };
+  }
+
+  if (query.preset === "lastMonth") {
+    const from = new Date(today);
+    from.setMonth(from.getMonth() - 1, 1);
+    const to = new Date(today);
+    to.setDate(0);
+    to.setHours(23, 59, 59, 999);
+    return { label: "Last month", from, to };
   }
 
   if (query.preset === "year") {
@@ -180,8 +207,11 @@ function resolveGranularity(query: DashboardQuery, range: DashboardWindow): Tren
   }
 
   if (query.preset === "today") return "hourly";
+  if (query.preset === "yesterday") return "hourly";
   if (query.preset === "week") return "daily";
+  if (query.preset === "lastWeek") return "daily";
   if (query.preset === "month") return "daily";
+  if (query.preset === "lastMonth") return "daily";
   if (query.preset === "year") return "monthly";
   if (query.preset === "all") return "monthly";
 
@@ -314,6 +344,9 @@ function formatBucketLabel(bucket: Date, granularity: TrendGranularity): string 
 
 function resolveServingTable(query: DashboardQuery): { tableName: RollupTableName; tableGranularity: RollupGranularity } {
   if (query.preset === "today") {
+    return { tableName: "rollup_hourly", tableGranularity: "hourly" };
+  }
+  if (query.preset === "yesterday") {
     return { tableName: "rollup_hourly", tableGranularity: "hourly" };
   }
   if (query.preset === "year" || query.preset === "all") {

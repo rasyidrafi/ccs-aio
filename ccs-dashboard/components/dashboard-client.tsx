@@ -57,7 +57,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { cn } from "@/lib/utils"
 import type {
   DashboardKeyRow,
@@ -77,11 +76,16 @@ const TABLE_PANEL_HEIGHT = "h-[640px]"
 const PRESET_OPTIONS: Array<{ value: DatePreset; label: string }> = [
   { value: "all", label: "All time" },
   { value: "today", label: "Today" },
+  { value: "yesterday", label: "Yesterday" },
   { value: "week", label: "This week" },
+  { value: "lastWeek", label: "Last week" },
   { value: "month", label: "This month" },
+  { value: "lastMonth", label: "Last month" },
   { value: "year", label: "This year" },
   { value: "custom", label: "Custom" },
 ]
+
+const DESKTOP_PRESET_OPTIONS = PRESET_OPTIONS.filter((option) => option.value !== "custom")
 
 function buildQuery(
   preset: DatePreset,
@@ -210,7 +214,7 @@ function getGranularityOptions(preset: DatePreset): Array<{ value: TrendGranular
     ]
   }
 
-  if (preset === "today") {
+  if (preset === "today" || preset === "yesterday") {
     return [
       { value: "auto", label: "Auto (hourly)" },
       { value: "hourly", label: "Hourly" },
@@ -288,7 +292,7 @@ function LoadingControlRows() {
         <div className="hidden min-w-0 items-center gap-2 sm:flex lg:max-w-[680px]">
           <div className="shrink-0 text-xs font-medium text-muted-foreground">Range</div>
           <div className="flex min-w-0 flex-1 gap-2 overflow-hidden">
-            {["w-20", "w-20", "w-24", "w-24", "w-20", "w-20"].map((width, index) => (
+            {["w-44", "w-20"].map((width, index) => (
               <Skeleton key={index} className={`h-8 shrink-0 ${width}`} />
             ))}
           </div>
@@ -594,6 +598,7 @@ function DashboardOverview({
     ? granularity
     : DEFAULT_GRANULARITY
   const presetLabel = getOptionLabel(PRESET_OPTIONS, preset)
+  const desktopPresetLabel = preset === "custom" ? "Select range" : presetLabel
   const granularityLabel = getOptionLabel(granularityOptions, selectedGranularity)
 
   return (
@@ -672,33 +677,38 @@ function DashboardOverview({
 
           <div className="hidden min-w-0 items-center gap-2 sm:flex lg:max-w-[680px]">
             <span className="shrink-0 text-xs font-medium text-muted-foreground">Range</span>
-            <ScrollArea className="w-full whitespace-nowrap rounded-md">
-              <div className="w-max pb-1">
-                <ToggleGroup
-                  value={[preset]}
-                  variant="outline"
-                  spacing={2}
-                  className="min-w-max"
-                  onValueChange={(value) => {
-                    const nextValue = value[0] as DatePreset | undefined
-                    if (!nextValue) return
-                    startTransition(() => setPreset(nextValue))
-                  }}
-                >
-                  {PRESET_OPTIONS.map((option) => (
-                    <ToggleGroupItem
-                      key={option.value}
-                      value={option.value}
-                      aria-label={`Set ${option.label.toLowerCase()} range`}
-                      className="h-8"
-                    >
-                      {option.label}
-                    </ToggleGroupItem>
-                  ))}
-                </ToggleGroup>
-              </div>
-              <ScrollBar orientation="horizontal" />
-            </ScrollArea>
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <Select
+                value={preset === "custom" ? undefined : preset}
+                onValueChange={(value: string | null) => {
+                  if (!value) return
+                  startTransition(() => setPreset(value as DatePreset))
+                }}
+              >
+                <SelectTrigger className="h-8 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
+                  <span className="truncate">{desktopPresetLabel}</span>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>Preset</SelectLabel>
+                    {DESKTOP_PRESET_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <Button
+                variant={preset === "custom" ? "default" : "outline"}
+                className="h-8 shrink-0"
+                onClick={() => {
+                  startTransition(() => setPreset("custom"))
+                }}
+              >
+                Custom
+              </Button>
+            </div>
           </div>
 
           <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-end">
