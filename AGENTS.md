@@ -10,8 +10,6 @@
 
 - `ccs-backup` is the collector/converter service. It reads source usage from `~/.ccs` and writes the durable dashboard database to `~/.ccs-dashboard/data/usage-v2.db`.
 - `ccs-dashboard` is the new Next.js dashboard. Its API reads `~/.ccs-dashboard/data/usage-v2.db`; the UI must not read raw `~/.ccs` files directly.
-- `ccs-dashboard-old` is reference-only. Copy UI ideas from it if useful, but do not copy its old backend/data handling.
-- `ccs-old-data` is only for historical backfill/input inspection.
 
 ## Dashboard UI Direction
 
