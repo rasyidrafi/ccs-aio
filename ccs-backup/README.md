@@ -1,6 +1,6 @@
 # ccs-backup
 
-Phase 2 durable usage collector for CCS.
+Phase 3 durable usage collector for CCS.
 
 Current scope:
 - one-shot `sync` command
@@ -8,6 +8,7 @@ Current scope:
 - ingest from live CLIProxy management usage API when available
 - ingest from `~/.ccs/cache/cliproxy-usage/latest.json`
 - persist deduplicated raw events into `~/.ccs-dashboard/data/usage-v2.db`
+- maintain read-optimized `hourly`, `daily`, and `monthly` rollup tables
 - track sync state in SQLite
 - user-systemd timer templates for every 10 minutes
 

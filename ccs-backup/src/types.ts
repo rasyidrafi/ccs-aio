@@ -50,12 +50,23 @@ export interface StatusSourceState {
   message: string | null;
 }
 
+export interface RollupStatusSummary {
+  rowCount: number;
+  firstBucketStart: string | null;
+  lastBucketStart: string | null;
+}
+
 export interface StatusSummary {
   dbPath: string;
   exists: boolean;
   rawEventCount: number;
   firstEventAt: string | null;
   lastEventAt: string | null;
+  rollups: {
+    hourly: RollupStatusSummary;
+    daily: RollupStatusSummary;
+    monthly: RollupStatusSummary;
+  };
   sync: {
     status: string | null;
     startedAt: string | null;
