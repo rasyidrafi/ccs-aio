@@ -161,10 +161,12 @@ function resolveWindow(query: DashboardQuery, now = new Date()): DashboardWindow
   }
 
   if (query.preset === "lastWeek") {
-    const to = new Date(today.getTime() - 1);
     const from = new Date(today);
     const shift = (from.getDay() + 6) % 7;
     from.setDate(from.getDate() - shift - 7);
+    const to = new Date(today);
+    to.setDate(to.getDate() - shift);
+    to.setMilliseconds(to.getMilliseconds() - 1);
     return { label: "Last week", from, to };
   }
 
