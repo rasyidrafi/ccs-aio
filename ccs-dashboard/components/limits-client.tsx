@@ -102,8 +102,8 @@ function getPlanBadgeVariant(planType: string | null): "secondary" | "outline" |
 
 function getPlanBadgeClassName(planType: string | null): string {
   const value = planType?.toLowerCase() ?? ""
-  if (value === "plus") return "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
-  if (value === "team") return "border-sky-500/40 bg-sky-500/15 text-sky-200"
+  if (value === "plus") return "border-emerald-500/40 bg-emerald-500/15 text-emerald-800 dark:text-emerald-200"
+  if (value === "team") return "border-sky-500/40 bg-sky-500/15 text-sky-800 dark:text-sky-200"
   return ""
 }
 
