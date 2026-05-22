@@ -28,9 +28,15 @@ export function ThemeSelect({ className }: { className?: string }) {
     setMounted(true)
   }, [])
 
-  const value = mounted ? theme ?? "system" : "system"
-  const label = THEME_OPTIONS.find((option) => option.value === value)?.label ?? "System"
-  const icon = resolvedTheme === "dark" ? <MoonStar className="size-4" /> : <SunMedium className="size-4" />
+  const value = mounted ? (theme ?? "system") : "system"
+  const label =
+    THEME_OPTIONS.find((option) => option.value === value)?.label ?? "System"
+  const icon =
+    resolvedTheme === "dark" ? (
+      <MoonStar className="size-4" />
+    ) : (
+      <SunMedium className="size-4" />
+    )
 
   return (
     <Select

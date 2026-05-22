@@ -4,13 +4,23 @@ import path from "node:path"
 
 import YAML from "yaml"
 
-import { buildStablePublicId, redactEmail, redactSensitiveText } from "@/lib/redaction"
-import type { LimitsAccountRow, LimitsAlert, LimitsPayload, LimitsQuotaWindow } from "@/lib/types"
+import {
+  buildStablePublicId,
+  redactEmail,
+  redactSensitiveText,
+} from "@/lib/redaction"
+import type {
+  LimitsAccountRow,
+  LimitsAlert,
+  LimitsPayload,
+  LimitsQuotaWindow,
+} from "@/lib/types"
 
 const DEFAULT_MANAGEMENT_SECRET = "ccs"
 const DEFAULT_PORT = 8097
 const CODEX_API_BASE = "https://chatgpt.com/backend-api"
-const CODEX_USER_AGENT = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
+const CODEX_USER_AGENT =
+  "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 const LIMITS_CACHE_TTL_MS = 90_000
 
 type UnifiedConfig = {
@@ -104,19 +114,31 @@ function parseYamlText<T>(value: string | null): T | null {
 async function resolveContext(): Promise<LimitsContext> {
   const ccsDir =
     process.env.CCS_DIR ||
-    (process.env.CCS_HOME ? path.join(process.env.CCS_HOME, ".ccs") : path.join(homedir(), ".ccs"))
+    (process.env.CCS_HOME
+      ? path.join(process.env.CCS_HOME, ".ccs")
+      : path.join(homedir(), ".ccs"))
 
   const unifiedConfigPath = path.join(ccsDir, "config.yaml")
   const cliproxyConfigPath = path.join(ccsDir, "cliproxy", "config.yaml")
-  const unifiedConfig = parseYamlText<UnifiedConfig>(await readUtf8(unifiedConfigPath))
-  const cliproxyConfig = parseYamlText<CliproxyConfig>(await readUtf8(cliproxyConfigPath))
+  const unifiedConfig = parseYamlText<UnifiedConfig>(
+    await readUtf8(unifiedConfigPath)
+  )
+  const cliproxyConfig = parseYamlText<CliproxyConfig>(
+    await readUtf8(cliproxyConfigPath)
+  )
 
-  const port = unifiedConfig?.cliproxy_server?.local?.port ?? cliproxyConfig?.port ?? DEFAULT_PORT
-  const authDir = cliproxyConfig?.["auth-dir"]?.trim() || path.join(ccsDir, "cliproxy", "auth")
+  const port =
+    unifiedConfig?.cliproxy_server?.local?.port ??
+    cliproxyConfig?.port ??
+    DEFAULT_PORT
+  const authDir =
+    cliproxyConfig?.["auth-dir"]?.trim() ||
+    path.join(ccsDir, "cliproxy", "auth")
 
   return {
     managementUrl:
-      process.env.CLIPROXY_MANAGEMENT_URL?.trim()?.replace(/\/$/, "") || `http://127.0.0.1:${port}`,
+      process.env.CLIPROXY_MANAGEMENT_URL?.trim()?.replace(/\/$/, "") ||
+      `http://127.0.0.1:${port}`,
     managementSecret:
       process.env.CLIPROXY_MANAGEMENT_SECRET?.trim() ||
       unifiedConfig?.cliproxy?.auth?.management_secret?.trim() ||
@@ -125,27 +147,36 @@ async function resolveContext(): Promise<LimitsContext> {
   }
 }
 
-async function fetchManagementAuthFiles(ctx: LimitsContext): Promise<AuthFileApiEntry[]> {
+async function fetchManagementAuthFiles(
+  ctx: LimitsContext
+): Promise<AuthFileApiEntry[]> {
   try {
-    const response = await fetch(`${ctx.managementUrl}/v0/management/auth-files`, {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${ctx.managementSecret}`,
-      },
-      cache: "no-store",
-    })
+    const response = await fetch(
+      `${ctx.managementUrl}/v0/management/auth-files`,
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${ctx.managementSecret}`,
+        },
+        cache: "no-store",
+      }
+    )
     if (!response.ok) {
       return []
     }
 
     const body = (await response.json()) as { files?: AuthFileApiEntry[] }
-    return Array.isArray(body.files) ? body.files.filter((entry) => entry.provider === "codex") : []
+    return Array.isArray(body.files)
+      ? body.files.filter((entry) => entry.provider === "codex")
+      : []
   } catch {
     return []
   }
 }
 
-async function scanLocalCodexAuthFiles(authDir: string): Promise<AuthFileApiEntry[]> {
+async function scanLocalCodexAuthFiles(
+  authDir: string
+): Promise<AuthFileApiEntry[]> {
   try {
     const names = await readdir(authDir)
     return names
@@ -166,7 +197,11 @@ function isExpired(expiresAt: string | null | undefined): boolean {
   return Number.isFinite(value) && value <= Date.now()
 }
 
-function resolveMaskedAccountIdentity(entry: AuthFileApiEntry, auth: AuthFileRecord | null, sourceLabel: string) {
+function resolveMaskedAccountIdentity(
+  entry: AuthFileApiEntry,
+  auth: AuthFileRecord | null,
+  sourceLabel: string
+) {
   const rawEmail = entry.email || auth?.email || ""
   const redactedEmail = redactEmail(rawEmail)
   const displayName =
@@ -181,14 +216,19 @@ function resolveMaskedAccountIdentity(entry: AuthFileApiEntry, auth: AuthFileRec
   }
 }
 
-function resolveWindow(label: string, raw: CodexUsageWindow | undefined | null): LimitsQuotaWindow | null {
+function resolveWindow(
+  label: string,
+  raw: CodexUsageWindow | undefined | null
+): LimitsQuotaWindow | null {
   if (!raw) return null
 
   const usedPercentRaw = raw.used_percent ?? raw.usedPercent ?? 0
   const usedPercent = Math.max(0, Math.min(100, Number(usedPercentRaw) || 0))
-  const resetAfterSecondsRaw = raw.reset_after_seconds ?? raw.resetAfterSeconds ?? null
+  const resetAfterSecondsRaw =
+    raw.reset_after_seconds ?? raw.resetAfterSeconds ?? null
   const resetAfterSeconds =
-    typeof resetAfterSecondsRaw === "number" && Number.isFinite(resetAfterSecondsRaw)
+    typeof resetAfterSecondsRaw === "number" &&
+    Number.isFinite(resetAfterSecondsRaw)
       ? Math.max(0, resetAfterSecondsRaw)
       : null
 
@@ -197,14 +237,22 @@ function resolveWindow(label: string, raw: CodexUsageWindow | undefined | null):
     usedPercent,
     remainingPercent: Math.max(0, 100 - usedPercent),
     resetAfterSeconds,
-    resetAt: resetAfterSeconds !== null ? new Date(Date.now() + resetAfterSeconds * 1000).toISOString() : null,
+    resetAt:
+      resetAfterSeconds !== null
+        ? new Date(Date.now() + resetAfterSeconds * 1000).toISOString()
+        : null,
   }
 }
 
 function normalizePlanType(value: string | null | undefined): string | null {
   const normalized = value?.trim().toLowerCase() ?? ""
   if (!normalized) return null
-  if (normalized === "business" || normalized === "team" || normalized === "blue") return "team"
+  if (
+    normalized === "business" ||
+    normalized === "team" ||
+    normalized === "blue"
+  )
+    return "team"
   if (normalized === "plus") return "plus"
   if (normalized === "free") return "free"
   return normalized
@@ -241,9 +289,17 @@ async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
     const payload = (await response.json()) as CodexUsageResponse
     const rateLimit = payload.rate_limit || payload.rateLimit
     return {
-      planType: normalizePlanType((payload.plan_type || payload.planType || null)?.toString()),
-      fiveHour: resolveWindow("5 hour", rateLimit?.primary_window || rateLimit?.primaryWindow),
-      weekly: resolveWindow("Weekly", rateLimit?.secondary_window || rateLimit?.secondaryWindow),
+      planType: normalizePlanType(
+        (payload.plan_type || payload.planType || null)?.toString()
+      ),
+      fiveHour: resolveWindow(
+        "5 hour",
+        rateLimit?.primary_window || rateLimit?.primaryWindow
+      ),
+      weekly: resolveWindow(
+        "Weekly",
+        rateLimit?.secondary_window || rateLimit?.secondaryWindow
+      ),
     }
   } finally {
     clearTimeout(timer)
@@ -259,15 +315,19 @@ function buildAlert(account: {
   const weekly = account.weekly
   const fiveHour = account.fiveHour
   if (!weekly || !fiveHour) return null
-  if (weekly.remainingPercent <= 0 || fiveHour.remainingPercent <= 0) return null
-  if (weekly.resetAfterSeconds === null || weekly.resetAfterSeconds > 86_400) return null
+  if (weekly.remainingPercent <= 0 || fiveHour.remainingPercent <= 0)
+    return null
+  if (weekly.resetAfterSeconds === null || weekly.resetAfterSeconds > 86_400)
+    return null
 
   const urgent = weekly.resetAfterSeconds <= 21_600
   return {
     id: `alert-${account.id}`,
     severity: urgent ? "urgent" : "warning",
     accountLabel: account.displayName,
-    title: urgent ? "Weekly reset is close" : "Weekly window resets within a day",
+    title: urgent
+      ? "Weekly reset is close"
+      : "Weekly window resets within a day",
     message: urgent
       ? "This account still has weekly quota and an open 5-hour window. Spend it before the weekly reset clears the remaining headroom."
       : "This account still has weekly quota left and can still be used now. Consider burning the remaining weekly capacity before reset.",
@@ -288,14 +348,19 @@ function sortAccounts(accounts: LimitsAccountRow[]): LimitsAccountRow[] {
   })
 }
 
-export async function getLimitsPayload(forceRefresh = false): Promise<LimitsPayload> {
+export async function getLimitsPayload(
+  forceRefresh = false
+): Promise<LimitsPayload> {
   if (!forceRefresh && limitsCache && limitsCache.expiresAt > Date.now()) {
     return limitsCache.payload
   }
 
   const ctx = await resolveContext()
   const discovered = await fetchManagementAuthFiles(ctx)
-  const sourceFiles = discovered.length > 0 ? discovered : await scanLocalCodexAuthFiles(ctx.authDir)
+  const sourceFiles =
+    discovered.length > 0
+      ? discovered
+      : await scanLocalCodexAuthFiles(ctx.authDir)
 
   const accounts = await Promise.all(
     sourceFiles.map(async (entry): Promise<LimitsAccountRow> => {
@@ -381,19 +446,24 @@ export async function getLimitsPayload(forceRefresh = false): Promise<LimitsPayl
           fiveHour: null,
           weekly: null,
           alert: null,
-          error: error instanceof Error ? error.message : "Quota request failed",
+          error:
+            error instanceof Error ? error.message : "Quota request failed",
         }
       }
     })
   )
 
   const sortedAccounts = sortAccounts(accounts)
-  const alerts = sortedAccounts.flatMap((account) => (account.alert ? [account.alert] : []))
+  const alerts = sortedAccounts.flatMap((account) =>
+    account.alert ? [account.alert] : []
+  )
   const payload: LimitsPayload = {
     generatedAt: new Date().toISOString(),
     summary: {
       totalAccounts: sortedAccounts.length,
-      activeAccounts: sortedAccounts.filter((account) => account.status === "active").length,
+      activeAccounts: sortedAccounts.filter(
+        (account) => account.status === "active"
+      ).length,
       resetSoonCount: alerts.length,
       exhaustedWeeklyCount: sortedAccounts.filter(
         (account) => account.weekly && account.weekly.remainingPercent <= 0

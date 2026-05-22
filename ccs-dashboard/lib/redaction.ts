@@ -10,7 +10,11 @@ export function buildStablePublicId(value: string, length = 6): string {
   return shortUsageHash(value).slice(0, length).toUpperCase()
 }
 
-function maskSegment(value: string, keepStart: number, keepEnd: number): string {
+function maskSegment(
+  value: string,
+  keepStart: number,
+  keepEnd: number
+): string {
   const trimmed = value.trim()
   if (!trimmed) return ""
   if (trimmed.length <= keepStart + keepEnd) {
@@ -43,14 +47,19 @@ export function redactEmailsInText(value: string | null | undefined): string {
   const text = value?.trim() || ""
   if (!text) return ""
 
-  return text.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, (match) => redactEmail(match))
+  return text.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, (match) =>
+    redactEmail(match)
+  )
 }
 
 export function redactTokensInText(value: string | null | undefined): string {
   const text = value?.trim() || ""
   if (!text) return ""
 
-  return text.replace(/\b(?:sk|rk|pk|proj|sess)-[A-Za-z0-9._-]{8,}\b/gi, () => MASK)
+  return text.replace(
+    /\b(?:sk|rk|pk|proj|sess)-[A-Za-z0-9._-]{8,}\b/gi,
+    () => MASK
+  )
 }
 
 export function redactSensitiveText(value: string | null | undefined): string {
