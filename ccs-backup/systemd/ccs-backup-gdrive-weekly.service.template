@@ -1,0 +1,14 @@
+[Unit]
+Description=CCS weekly Google Drive backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__WORKDIR__
+Environment=RCLONE_REMOTE=__RCLONE_REMOTE__
+ExecStart=/bin/bash -lc 'exec __WORKDIR__/scripts/backup-to-gdrive.sh'
+Nice=10
+
+[Install]
+WantedBy=default.target

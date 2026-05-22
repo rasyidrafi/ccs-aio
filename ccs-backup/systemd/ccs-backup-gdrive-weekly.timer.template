@@ -1,0 +1,10 @@
+[Unit]
+Description=Run CCS weekly Google Drive backup
+
+[Timer]
+OnCalendar=Sun *-*-* 03:15:00
+Persistent=true
+Unit=ccs-backup-gdrive-weekly.service
+
+[Install]
+WantedBy=timers.target
