@@ -158,12 +158,15 @@ function LoadingLimitsHeader() {
         <div className="flex flex-col gap-2 sm:grid sm:grid-cols-[minmax(0,156px)_minmax(0,180px)] lg:flex lg:flex-row lg:items-center">
           <div className="flex min-w-0 items-center gap-2 sm:col-span-2 lg:hidden">
             <div className="w-12 shrink-0 text-xs font-medium text-muted-foreground">Page</div>
-            <Skeleton className="h-8 min-w-0 flex-1" />
+            <div className="flex min-w-0 flex-1">
+              <Skeleton className="h-8 min-w-0 flex-1 rounded-r-none" />
+              <Skeleton className="h-8 min-w-0 flex-1 rounded-l-none border-l-0" />
+            </div>
           </div>
           <div className="hidden lg:block">
-            <div className="flex items-center gap-2">
-              <Skeleton className="h-9 w-[142px]" />
-              <Skeleton className="h-9 w-[102px]" />
+            <div className="flex items-center">
+              <Skeleton className="h-9 w-[142px] rounded-r-none" />
+              <Skeleton className="h-9 w-[102px] rounded-l-none border-l-0" />
             </div>
           </div>
           <div className="flex min-w-0 items-center gap-2 sm:block">

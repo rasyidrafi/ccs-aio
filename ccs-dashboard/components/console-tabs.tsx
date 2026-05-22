@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation"
 import { ChartColumnBig, ShieldAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { ButtonGroup } from "@/components/ui/button-group"
 import { cn } from "@/lib/utils"
 
 const ITEMS = [
@@ -16,7 +17,7 @@ export function ConsoleTabs({ className }: { className?: string }) {
   const pathname = usePathname()
 
   return (
-    <div className={cn("flex min-w-0 items-center gap-2", className)}>
+    <ButtonGroup className={cn("flex min-w-0 items-center", className)}>
       {ITEMS.map((item) => {
         const active = pathname === item.href
         const Icon = item.icon
@@ -30,6 +31,6 @@ export function ConsoleTabs({ className }: { className?: string }) {
           </Button>
         )
       })}
-    </div>
+    </ButtonGroup>
   )
 }
