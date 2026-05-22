@@ -39,16 +39,8 @@ async function DashboardServerContent({
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
   const params = await searchParams
-  const refreshKey =
-    typeof params.refresh === "string" ? params.refresh : "initial"
   const query = parseDashboardQuery(toUrlSearchParams(params))
-  const dashboard = await getCachedDashboardPayload(query, refreshKey)
+  const dashboard = await getCachedDashboardPayload(query)
 
-  return (
-    <DashboardClient
-      dashboard={dashboard}
-      query={query}
-      refreshKey={refreshKey}
-    />
-  )
+  return <DashboardClient dashboard={dashboard} query={query} />
 }

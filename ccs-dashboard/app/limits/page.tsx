@@ -20,10 +20,8 @@ async function LimitsServerContent({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
-  const params = await searchParams
-  const refreshKey =
-    typeof params.refresh === "string" ? params.refresh : "initial"
-  const limits = await getCachedLimitsPayload(refreshKey)
+  await searchParams
+  const limits = await getCachedLimitsPayload()
 
-  return <LimitsClient limits={limits} refreshKey={refreshKey} />
+  return <LimitsClient limits={limits} />
 }

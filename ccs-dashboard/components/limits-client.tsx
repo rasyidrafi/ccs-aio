@@ -12,6 +12,7 @@ import {
 
 import { ThemeProvider } from "@/components/theme-provider"
 import { Badge } from "@/components/ui/badge"
+import { refreshLimits as refreshLimitsTag } from "@/app/actions"
 import { LimitsOverview } from "@/components/limits/limits-overview"
 import {
   AlertsPanel,
@@ -23,13 +24,7 @@ import type { LimitsPayload } from "@/lib/types"
 
 export { LimitsPageSkeleton } from "@/components/limits/limits-loading"
 
-export function LimitsClient({
-  limits,
-  refreshKey,
-}: {
-  limits: LimitsPayload
-  refreshKey: string
-}) {
+export function LimitsClient({ limits }: { limits: LimitsPayload }) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
   const isRefreshing = isPending
@@ -50,12 +45,10 @@ export function LimitsClient({
     [limits]
   )
 
-  function refreshLimits() {
-    const nextRefreshKey = String(Date.now())
-    if (nextRefreshKey === refreshKey) return
-
-    startTransition(() => {
-      router.replace(`/limits?refresh=${nextRefreshKey}`, { scroll: false })
+  function handleRefresh() {
+    startTransition(async () => {
+      await refreshLimitsTag()
+      router.refresh()
     })
   }
 
@@ -66,7 +59,7 @@ export function LimitsClient({
           <LimitsOverview
             limits={limits}
             loading={isPending}
-            onRefresh={refreshLimits}
+            onRefresh={handleRefresh}
           />
 
           <section className="space-y-4">

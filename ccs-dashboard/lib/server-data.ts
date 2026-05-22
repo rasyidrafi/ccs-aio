@@ -9,8 +9,7 @@ import type {
 } from "@/lib/types"
 
 export async function getCachedDashboardPayload(
-  query: DashboardQuery,
-  refreshKey = "initial"
+  query: DashboardQuery
 ): Promise<DashboardPayload> {
   "use cache"
   cacheLife({
@@ -20,13 +19,10 @@ export async function getCachedDashboardPayload(
   })
   cacheTag("dashboard")
 
-  void refreshKey
   return getDashboardPayload(query)
 }
 
-export async function getCachedLimitsPayload(
-  refreshKey = "initial"
-): Promise<LimitsPayload> {
+export async function getCachedLimitsPayload(): Promise<LimitsPayload> {
   "use cache"
   cacheLife({
     stale: 60,
@@ -35,5 +31,5 @@ export async function getCachedLimitsPayload(
   })
   cacheTag("limits")
 
-  return getLimitsPayload(refreshKey !== "initial")
+  return getLimitsPayload(true)
 }

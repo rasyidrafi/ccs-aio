@@ -12,6 +12,7 @@ import {
 
 import { ThemeProvider } from "@/components/theme-provider"
 import { Badge } from "@/components/ui/badge"
+import { refreshDashboard } from "@/app/actions"
 import {
   DashboardTrend,
   EmptyState,
@@ -44,11 +45,9 @@ export { DashboardPageSkeleton } from "@/components/dashboard/dashboard-loading"
 export function DashboardClient({
   dashboard,
   query,
-  refreshKey,
 }: {
   dashboard: DashboardPayload
   query: DashboardQuery
-  refreshKey: string
 }) {
   const router = useRouter()
   const [isPending, startUrlTransition] = useTransition()
@@ -77,14 +76,12 @@ export function DashboardClient({
     from?: string
     to?: string
     granularity?: TrendGranularityInput
-    refreshKey?: string
   }) {
     const nextPreset = next.preset ?? preset
     const nextFrom = next.from ?? from
     const nextTo = next.to ?? to
     const nextGranularity = next.granularity ?? activeGranularity
-    const nextRefreshKey = next.refreshKey ?? refreshKey
-    const href = `/?${buildQuery(nextPreset, nextFrom, nextTo, nextGranularity, nextRefreshKey)}`
+    const href = `/?${buildQuery(nextPreset, nextFrom, nextTo, nextGranularity)}`
 
     startUrlTransition(() => {
       router.replace(href, { scroll: false })
@@ -99,6 +96,13 @@ export function DashboardClient({
   function setGranularity(value: TrendGranularityInput) {
     setGranularityState(value)
     navigate({ granularity: value })
+  }
+
+  function handleRefresh() {
+    startUrlTransition(async () => {
+      await refreshDashboard()
+      router.refresh()
+    })
   }
 
   return (
@@ -124,7 +128,7 @@ export function DashboardClient({
                 navigate({ preset: nextPreset, from: nextFrom, to: nextTo })
               })
             }}
-            onRefresh={() => navigate({ refreshKey: String(Date.now()) })}
+            onRefresh={handleRefresh}
           />
 
           <section className="space-y-4">

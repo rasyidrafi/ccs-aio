@@ -40,8 +40,7 @@ export function buildQuery(
   preset: DatePreset,
   from: string,
   to: string,
-  granularity: TrendGranularityInput,
-  refreshKey: string
+  granularity: TrendGranularityInput
 ): string {
   const params = new URLSearchParams()
   params.set("preset", preset)
@@ -53,10 +52,6 @@ export function buildQuery(
   if (preset === "custom") {
     if (from) params.set("from", from)
     if (to) params.set("to", to)
-  }
-
-  if (refreshKey !== "initial") {
-    params.set("refresh", refreshKey)
   }
 
   return params.toString()
