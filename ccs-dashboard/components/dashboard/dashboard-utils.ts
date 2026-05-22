@@ -62,9 +62,28 @@ export function formatNumber(value: number): string {
 }
 
 export function formatTokenCount(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
-  return formatNumber(value)
+  const absValue = Math.abs(value)
+  const units = ["", "K", "M", "B", "T", "Q"]
+
+  if (absValue < 1_000) return formatNumber(value)
+
+  const unitIndex = Math.min(
+    Math.floor(Math.log10(absValue) / 3),
+    units.length - 1
+  )
+  const scaled = value / 1_000 ** unitIndex
+  const absScaled = Math.abs(scaled)
+  const fractionDigits = absScaled >= 100 ? 0 : absScaled >= 10 ? 1 : 2
+
+  return `${scaled.toFixed(fractionDigits)}${units[unitIndex]}`
+}
+
+export function formatTokenCountExact(value: number): string {
+  return new Intl.NumberFormat("en-US").format(Math.round(value))
+}
+
+export function formatTokenCountWithExact(value: number): string {
+  return `${formatTokenCount(value)} (${formatTokenCountExact(value)})`
 }
 
 export function formatCost(value: number): string {

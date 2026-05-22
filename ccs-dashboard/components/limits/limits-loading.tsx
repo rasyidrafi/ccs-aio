@@ -1,5 +1,6 @@
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
+import { ThemeProvider } from "@/components/theme-provider"
 import { cn } from "@/lib/utils"
 import { TABLE_PANEL_HEIGHT } from "@/components/limits/limits-utils"
 
@@ -152,41 +153,47 @@ function LoadingLimitsTable() {
 
 export function LimitsPageSkeleton() {
   return (
-    <div className="space-y-4">
-      <LoadingLimitsHeader />
-      <section className="space-y-4">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-2">
-            <Skeleton className="h-6 w-36" />
-            <Skeleton className="h-4 w-72 max-w-full" />
-          </div>
-          <Skeleton className="h-6 w-32 rounded-full" />
+    <ThemeProvider>
+      <main className="min-h-screen bg-background">
+        <div className="mx-auto flex min-h-screen max-w-[1600px] flex-col gap-4 px-4 py-6 lg:px-6 lg:py-8">
+          <LoadingLimitsHeader />
+          <section className="space-y-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-2">
+                <Skeleton className="h-6 w-36" />
+                <Skeleton className="h-4 w-72 max-w-full" />
+              </div>
+              <Skeleton className="h-6 w-32 rounded-full" />
+            </div>
+            <LoadingSummaryGrid />
+          </section>
+          <LoadingInventorySection />
+          <section className="space-y-4">
+            <div className="space-y-2">
+              <Skeleton className="h-6 w-32" />
+              <Skeleton className="h-4 w-64 max-w-full" />
+            </div>
+            <LoadingLimitsAlerts />
+          </section>
+          <section className="space-y-4">
+            <div className="space-y-2">
+              <Skeleton className="h-6 w-40" />
+              <Skeleton className="h-4 w-72 max-w-full" />
+            </div>
+            <Card
+              className={cn(TABLE_PANEL_HEIGHT, "border-border/70 bg-card/95")}
+            >
+              <CardHeader>
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-8 w-32" />
+              </CardHeader>
+              <CardContent className="min-h-0 flex-1">
+                <LoadingLimitsTable />
+              </CardContent>
+            </Card>
+          </section>
         </div>
-        <LoadingSummaryGrid />
-      </section>
-      <LoadingInventorySection />
-      <section className="space-y-4">
-        <div className="space-y-2">
-          <Skeleton className="h-6 w-32" />
-          <Skeleton className="h-4 w-64 max-w-full" />
-        </div>
-        <LoadingLimitsAlerts />
-      </section>
-      <section className="space-y-4">
-        <div className="space-y-2">
-          <Skeleton className="h-6 w-40" />
-          <Skeleton className="h-4 w-72 max-w-full" />
-        </div>
-        <Card className={cn(TABLE_PANEL_HEIGHT, "border-border/70 bg-card/95")}>
-          <CardHeader>
-            <Skeleton className="h-4 w-32" />
-            <Skeleton className="h-8 w-32" />
-          </CardHeader>
-          <CardContent className="min-h-0 flex-1">
-            <LoadingLimitsTable />
-          </CardContent>
-        </Card>
-      </section>
-    </div>
+      </main>
+    </ThemeProvider>
   )
 }
