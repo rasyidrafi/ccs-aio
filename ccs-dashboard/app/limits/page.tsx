@@ -1,26 +1,19 @@
 import { Suspense } from "react"
+import { connection } from "next/server"
 
 import { LimitsClient, LimitsPageSkeleton } from "@/components/limits-client"
 import { getCachedLimitsPayload } from "@/lib/server-data"
 
-type PageProps = {
-  searchParams: Promise<Record<string, string | string[] | undefined>>
-}
-
-export default async function LimitsPage({ searchParams }: PageProps) {
+export default function LimitsPage() {
   return (
     <Suspense fallback={<LimitsPageSkeleton />}>
-      <LimitsServerContent searchParams={searchParams} />
+      <LimitsServerContent />
     </Suspense>
   )
 }
 
-async function LimitsServerContent({
-  searchParams,
-}: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>
-}) {
-  await searchParams
+async function LimitsServerContent() {
+  await connection()
   const limits = await getCachedLimitsPayload()
 
   return <LimitsClient limits={limits} />

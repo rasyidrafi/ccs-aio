@@ -111,6 +111,16 @@ function parseYamlText<T>(value: string | null): T | null {
   return YAML.parse(value) as T
 }
 
+function parseJsonText<T>(value: string | null): T | null {
+  if (!value) return null
+
+  try {
+    return JSON.parse(value) as T
+  } catch {
+    return null
+  }
+}
+
 async function resolveContext(): Promise<LimitsContext> {
   const ccsDir =
     process.env.CCS_DIR ||
@@ -366,7 +376,7 @@ export async function getLimitsPayload(
     sourceFiles.map(async (entry): Promise<LimitsAccountRow> => {
       const filePath = entry.path || path.join(ctx.authDir, entry.name || "")
       const raw = await readUtf8(filePath)
-      const auth = raw ? (JSON.parse(raw) as AuthFileRecord) : null
+      const auth = parseJsonText<AuthFileRecord>(raw)
       const sourceLabel = entry.name || path.basename(filePath)
       const identity = resolveMaskedAccountIdentity(entry, auth, sourceLabel)
 

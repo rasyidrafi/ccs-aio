@@ -1,4 +1,5 @@
 import { Suspense } from "react"
+import { connection } from "next/server"
 
 import {
   DashboardClient,
@@ -40,7 +41,14 @@ async function DashboardServerContent({
 }) {
   const params = await searchParams
   const query = parseDashboardQuery(toUrlSearchParams(params))
+  await connection()
   const dashboard = await getCachedDashboardPayload(query)
 
-  return <DashboardClient dashboard={dashboard} query={query} />
+  return (
+    <DashboardClient
+      key={JSON.stringify(query)}
+      dashboard={dashboard}
+      query={query}
+    />
+  )
 }

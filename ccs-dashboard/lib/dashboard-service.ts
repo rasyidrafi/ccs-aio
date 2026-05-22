@@ -7,7 +7,6 @@ import YAML from "yaml"
 import { shortUsageHash } from "@/lib/redaction"
 import type {
   DashboardKeyRow,
-  DashboardModelRow,
   DashboardPayload,
   DashboardQuery,
   DashboardSourceBadge,
@@ -141,6 +140,19 @@ function startOfToday(now: Date): Date {
   return date
 }
 
+function parseLocalDate(
+  value: string | undefined,
+  fallback: Date,
+  endOfDay = false
+): Date {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return fallback
+  }
+
+  const parsed = new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00"}`)
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed
+}
+
 function resolveWindow(
   query: DashboardQuery,
   now = new Date()
@@ -197,8 +209,8 @@ function resolveWindow(
   }
 
   if (query.preset === "custom") {
-    const from = query.from ? new Date(`${query.from}T00:00:00`) : today
-    const to = query.to ? new Date(`${query.to}T23:59:59.999`) : now
+    const from = parseLocalDate(query.from, today)
+    const to = parseLocalDate(query.to, now, true)
     if (from.getTime() > to.getTime()) {
       return { label: "Custom range", from: to, to: from }
     }

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useSyncExternalStore } from "react"
 import { MoonStar, SunMedium } from "lucide-react"
 import { useTheme } from "next-themes"
 
@@ -20,13 +20,26 @@ const THEME_OPTIONS = [
   { value: "dark", label: "Dark" },
 ] as const
 
+function subscribeToHydration(onStoreChange: () => void) {
+  queueMicrotask(onStoreChange)
+  return () => {}
+}
+
+function getMountedSnapshot() {
+  return true
+}
+
+function getServerSnapshot() {
+  return false
+}
+
 export function ThemeSelect({ className }: { className?: string }) {
   const { theme, setTheme, resolvedTheme } = useTheme()
-  const [mounted, setMounted] = useState(false)
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
+  const mounted = useSyncExternalStore(
+    subscribeToHydration,
+    getMountedSnapshot,
+    getServerSnapshot
+  )
 
   const value = mounted ? (theme ?? "system") : "system"
   const label =
