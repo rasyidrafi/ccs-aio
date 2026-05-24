@@ -1,0 +1,12 @@
+[Unit]
+Description=Run CCS Codex weekly reset notifier every 10 minutes
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=10m
+AccuracySec=1m
+Persistent=true
+Unit=ccs-limit-notifier-reset.service
+
+[Install]
+WantedBy=timers.target

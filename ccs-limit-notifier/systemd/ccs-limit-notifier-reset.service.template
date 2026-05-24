@@ -1,0 +1,14 @@
+[Unit]
+Description=CCS Codex weekly reset notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=-__WORKDIR__/.env
+ExecStart=/bin/bash -lc 'mkdir -p "$HOME/.ccs-limit-notifier/run" && exec /usr/bin/flock -w 120 "$HOME/.ccs-limit-notifier/run/ccs-limit-notifier.lock" __BUN__ run src/cli.ts check-reset'
+Nice=10
+
+[Install]
+WantedBy=default.target
