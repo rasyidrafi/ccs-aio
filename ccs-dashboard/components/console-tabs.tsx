@@ -26,8 +26,11 @@ export function ConsoleTabs({ className }: { className?: string }) {
           <Button
             key={item.href}
             asChild
-            variant={active ? "secondary" : "outline"}
-            className="h-8 min-w-0 flex-1 sm:flex-none"
+            variant="outline"
+            className={cn(
+              "h-8 min-w-0 flex-1 sm:flex-none",
+              active && "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+            )}
           >
             <Link href={item.href} aria-current={active ? "page" : undefined}>
               <Icon className="size-4" />
