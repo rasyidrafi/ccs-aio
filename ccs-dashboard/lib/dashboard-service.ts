@@ -297,28 +297,6 @@ function stepBucket(bucket: Date, granularity: TrendGranularity): Date {
   return next
 }
 
-function stepBucketBack(bucket: Date, granularity: TrendGranularity): Date {
-  const previous = new Date(bucket)
-  if (granularity === "hourly") {
-    previous.setHours(previous.getHours() - 1)
-    return previous
-  }
-  if (granularity === "daily") {
-    previous.setDate(previous.getDate() - 1)
-    return previous
-  }
-  if (granularity === "weekly") {
-    previous.setDate(previous.getDate() - 7)
-    return previous
-  }
-  if (granularity === "monthly") {
-    previous.setMonth(previous.getMonth() - 1, 1)
-    return previous
-  }
-  previous.setFullYear(previous.getFullYear() - 1, 0, 1)
-  return previous
-}
-
 function formatLocalBucketStart(
   date: Date,
   granularity: RollupGranularity
@@ -547,12 +525,16 @@ function resolveTrendBucketBounds(
     return { from: range.from, to: range.to }
   }
 
+  const firstBucket = startOfLocalBucket(
+    parseLocalBucket(trendRows[0].bucket_start),
+    granularity
+  )
   const latestBucket = startOfLocalBucket(
     parseLocalBucket(trendRows[trendRows.length - 1].bucket_start),
     granularity
   )
   return {
-    from: stepBucketBack(latestBucket, granularity),
+    from: firstBucket,
     to: latestBucket,
   }
 }
@@ -640,8 +622,8 @@ export async function getDashboardPayload(
         SUM(cost) as cost
       FROM ${tableName}
       WHERE bucket_start BETWEEN ? AND ?
-      GROUP BY bucket_start
-      ORDER BY bucket_start ASC`
+      GROUP BY ${bucketExpression}
+      ORDER BY ${bucketExpression} ASC`
       )
       .all(rangeFromBucket, rangeToBucket) as unknown as TrendRow[]
 
