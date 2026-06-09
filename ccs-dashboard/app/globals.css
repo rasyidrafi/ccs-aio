@@ -127,3 +127,178 @@
     @apply font-sans;
     }
 }
+
+@keyframes plan-chip-sheen {
+  0% {
+    transform: translateX(-140%) skewX(-20deg);
+    opacity: 0;
+  }
+  18% {
+    opacity: 0.95;
+  }
+  42% {
+    transform: translateX(140%) skewX(-20deg);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(140%) skewX(-20deg);
+    opacity: 0;
+  }
+}
+
+@keyframes plan-chip-orbit {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@layer components {
+  .plan-chip-pro,
+  .plan-chip-pro-plus {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+  }
+
+  .plan-chip-pro {
+    border-color: color-mix(in oklab, oklch(0.72 0.15 84) 34%, transparent);
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, white 55%, transparent),
+        transparent 48%
+      ),
+      linear-gradient(
+        135deg,
+        oklch(0.94 0.06 96 / 0.95),
+        oklch(0.86 0.12 88 / 0.92) 48%,
+        oklch(0.78 0.15 78 / 0.9)
+      );
+    color: oklch(0.28 0.04 78);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.72),
+      0 0 0 1px rgba(161, 98, 7, 0.08),
+      0 6px 16px rgba(161, 98, 7, 0.12);
+  }
+
+  .plan-chip-pro::after {
+    content: "";
+    position: absolute;
+    inset: -32% -90%;
+    background: linear-gradient(
+      108deg,
+      transparent 34%,
+      rgba(255, 255, 255, 0.04) 43%,
+      rgba(255, 255, 255, 0.92) 50%,
+      rgba(255, 248, 220, 0.55) 54%,
+      rgba(255, 255, 255, 0.05) 60%,
+      transparent 70%
+    );
+    transform: translateX(-140%) skewX(-20deg);
+    animation: plan-chip-sheen 3.6s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  .plan-chip-pro-plus {
+    border-color: rgba(0, 0, 0, 0.08);
+    background:
+      linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.28),
+        rgba(255, 255, 255, 0) 40%
+      ),
+      linear-gradient(
+        135deg,
+        oklch(0.84 0.14 82 / 0.18),
+        oklch(0.68 0.18 315 / 0.2) 52%,
+        oklch(0.75 0.15 50 / 0.18)
+      );
+    color: oklch(0.27 0.04 40);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.52),
+      0 0 18px rgba(217, 119, 6, 0.16);
+  }
+
+  .plan-chip-pro-plus::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: conic-gradient(
+      from 0deg,
+      rgba(245, 158, 11, 0.16),
+      rgba(245, 158, 11, 0.95),
+      rgba(236, 72, 153, 0.9),
+      rgba(250, 204, 21, 0.92),
+      rgba(245, 158, 11, 0.16)
+    );
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: plan-chip-orbit 5.6s linear infinite;
+    pointer-events: none;
+  }
+
+  .plan-chip-pro-plus::after {
+    content: "";
+    position: absolute;
+    inset: -36% -88%;
+    background: linear-gradient(
+      108deg,
+      transparent 28%,
+      rgba(255, 255, 255, 0.05) 42%,
+      rgba(255, 255, 255, 0.88) 50%,
+      rgba(255, 255, 255, 0.06) 58%,
+      transparent 70%
+    );
+    transform: translateX(-140%) skewX(-18deg);
+    animation: plan-chip-sheen 3.2s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  .dark .plan-chip-pro {
+    border-color: color-mix(in oklab, oklch(0.83 0.09 88) 28%, transparent);
+    background:
+      linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.08),
+        rgba(255, 255, 255, 0) 42%
+      ),
+      linear-gradient(
+        135deg,
+        oklch(0.41 0.06 88 / 0.82),
+        oklch(0.47 0.1 84 / 0.72) 50%,
+        oklch(0.38 0.08 74 / 0.78)
+      );
+    color: oklch(0.95 0.03 95);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 0 16px rgba(251, 191, 36, 0.18);
+  }
+
+  .dark .plan-chip-pro-plus {
+    border-color: rgba(255, 255, 255, 0.1);
+    background:
+      linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.08),
+        rgba(255, 255, 255, 0) 42%
+      ),
+      linear-gradient(
+        135deg,
+        oklch(0.46 0.08 82 / 0.24),
+        oklch(0.5 0.16 315 / 0.26) 52%,
+        oklch(0.42 0.09 46 / 0.24)
+      );
+    color: oklch(0.96 0.02 95);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 0 22px rgba(232, 121, 249, 0.22);
+  }
+}

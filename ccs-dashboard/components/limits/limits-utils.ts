@@ -79,8 +79,8 @@ export function getPlanBadgeVariant(
 
 export function getPlanBadgeClassName(planType: string | null): string {
   const value = planType?.toLowerCase() ?? ""
-  if (value === "prolite" || value === "pro")
-    return "border-amber-600/30 bg-amber-500/15 text-amber-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] dark:border-amber-300/30 dark:bg-amber-400/12 dark:text-amber-100 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+  if (value === "prolite") return "plan-chip-pro"
+  if (value === "pro") return "plan-chip-pro-plus"
   if (value === "plus")
     return "border-emerald-500/40 bg-emerald-500/15 text-emerald-800 dark:text-emerald-200"
   if (value === "team")
@@ -92,8 +92,8 @@ export function formatPlanLabel(planType: string | null): string {
   if (!planType) return "Unknown"
 
   const value = planType.toLowerCase()
-  if (value === "prolite") return "Pro 5x"
-  if (value === "pro") return "Pro"
+  if (value === "prolite") return "Pro"
+  if (value === "pro") return "Pro+"
   if (value === "plus") return "Plus"
   if (value === "team") return "Team"
   if (value === "free") return "Free"
