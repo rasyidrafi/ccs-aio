@@ -70,6 +70,7 @@ export function getPlanBadgeVariant(
   planType: string | null
 ): "secondary" | "outline" | "destructive" {
   const value = planType?.toLowerCase() ?? ""
+  if (value === "pro" || value === "prolite") return "outline"
   if (value === "plus") return "secondary"
   if (value === "free") return "destructive"
   if (value === "team") return "outline"
@@ -78,6 +79,8 @@ export function getPlanBadgeVariant(
 
 export function getPlanBadgeClassName(planType: string | null): string {
   const value = planType?.toLowerCase() ?? ""
+  if (value === "prolite" || value === "pro")
+    return "border-amber-600/30 bg-amber-500/15 text-amber-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] dark:border-amber-300/30 dark:bg-amber-400/12 dark:text-amber-100 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
   if (value === "plus")
     return "border-emerald-500/40 bg-emerald-500/15 text-emerald-800 dark:text-emerald-200"
   if (value === "team")
@@ -87,5 +90,13 @@ export function getPlanBadgeClassName(planType: string | null): string {
 
 export function formatPlanLabel(planType: string | null): string {
   if (!planType) return "Unknown"
+
+  const value = planType.toLowerCase()
+  if (value === "prolite") return "Pro 5x"
+  if (value === "pro") return "Pro"
+  if (value === "plus") return "Plus"
+  if (value === "team") return "Team"
+  if (value === "free") return "Free"
+
   return planType.charAt(0).toUpperCase() + planType.slice(1)
 }
