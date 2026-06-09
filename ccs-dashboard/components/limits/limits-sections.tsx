@@ -155,6 +155,14 @@ function shouldMergeResetCell(account: LimitsAccountRow): boolean {
   )
 }
 
+function InlineNotePill({ children }: { children: string }) {
+  return (
+    <span className="inline-flex items-center rounded-md border border-border/60 bg-muted/80 px-1.5 py-0.5 font-mono text-[0.75em] leading-none text-foreground shadow-sm dark:border-border/50 dark:bg-muted/40">
+      {children}
+    </span>
+  )
+}
+
 export function AlertsPanel({
   limits,
   refreshing,
@@ -273,7 +281,12 @@ export function LimitsTable({
                             </div>
                             {sparkPool ? (
                               <div className="text-xs text-muted-foreground">
-                                use <code>codex --model gpt-5.3-codex-spark</code> to use spark model
+                                use{" "}
+                                <InlineNotePill>
+                                  codex --model gpt-5.3-codex-spark
+                                </InlineNotePill>
+                                <br />
+                                to use spark model
                               </div>
                             ) : null}
                             {account.error ? (
