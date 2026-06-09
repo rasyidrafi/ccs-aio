@@ -273,7 +273,7 @@ export function LimitsTable({
                             </div>
                             {sparkPool ? (
                               <div className="text-xs text-muted-foreground">
-                                Includes separate Spark pool
+                                use <code>codex --model gpt-5.3-codex-spark</code> to use spark model
                               </div>
                             ) : null}
                             {account.error ? (
