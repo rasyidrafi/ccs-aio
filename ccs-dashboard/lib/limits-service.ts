@@ -11,6 +11,7 @@ import {
 } from "@/lib/redaction"
 import type {
   LimitsAccountRow,
+  LimitsAdditionalPool,
   LimitsAlert,
   LimitsPayload,
   LimitsQuotaWindow,
@@ -71,6 +72,25 @@ type CodexUsageWindow = {
 type CodexUsageResponse = {
   plan_type?: string
   planType?: string
+  rate_limit?: {
+    primary_window?: CodexUsageWindow
+    primaryWindow?: CodexUsageWindow
+    secondary_window?: CodexUsageWindow
+    secondaryWindow?: CodexUsageWindow
+  } | null
+  rateLimit?: {
+    primary_window?: CodexUsageWindow
+    primaryWindow?: CodexUsageWindow
+    secondary_window?: CodexUsageWindow
+    secondaryWindow?: CodexUsageWindow
+  } | null
+  additional_rate_limits?: CodexAdditionalRateLimit[] | null
+  additionalRateLimits?: CodexAdditionalRateLimit[] | null
+}
+
+type CodexAdditionalRateLimit = {
+  limit_name?: string
+  limitName?: string
   rate_limit?: {
     primary_window?: CodexUsageWindow
     primaryWindow?: CodexUsageWindow
@@ -268,10 +288,25 @@ function normalizePlanType(value: string | null | undefined): string | null {
   return normalized
 }
 
+function prettifyFeatureLabel(value: string): string {
+  const normalized = value.trim()
+  if (!normalized) return "Additional"
+
+  if (normalized.toLowerCase().includes("codex-spark")) {
+    return "Codex Spark"
+  }
+
+  return normalized
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
   planType: string | null
   fiveHour: LimitsQuotaWindow | null
   weekly: LimitsQuotaWindow | null
+  additionalPools: LimitsAdditionalPool[]
 }> {
   if (!auth.access_token || !auth.account_id) {
     throw new Error("Missing Codex auth token or account id")
@@ -298,6 +333,8 @@ async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
 
     const payload = (await response.json()) as CodexUsageResponse
     const rateLimit = payload.rate_limit || payload.rateLimit
+    const additionalRateLimits =
+      payload.additional_rate_limits || payload.additionalRateLimits
     return {
       planType: normalizePlanType(
         (payload.plan_type || payload.planType || null)?.toString()
@@ -310,6 +347,28 @@ async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
         "Weekly",
         rateLimit?.secondary_window || rateLimit?.secondaryWindow
       ),
+      additionalPools: Array.isArray(additionalRateLimits)
+        ? additionalRateLimits.map((entry) => {
+            const featureLabel =
+              entry.limit_name?.trim() ||
+              entry.limitName?.trim() ||
+              "Additional"
+            const rateLimit = entry.rate_limit || entry.rateLimit
+
+            return {
+              featureLabel,
+              displayLabel: prettifyFeatureLabel(featureLabel),
+              fiveHour: resolveWindow(
+                `${featureLabel} (5h)`,
+                rateLimit?.primary_window || rateLimit?.primaryWindow
+              ),
+              weekly: resolveWindow(
+                `${featureLabel} (weekly)`,
+                rateLimit?.secondary_window || rateLimit?.secondaryWindow
+              ),
+            }
+          })
+        : [],
     }
   } finally {
     clearTimeout(timer)
@@ -393,6 +452,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: null,
           weekly: null,
+          additionalPools: [],
           alert: null,
           error: "Failed to read auth file",
         }
@@ -411,6 +471,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: null,
           weekly: null,
+          additionalPools: [],
           alert: null,
           error: "Token expired. Re-authenticate this Codex account.",
         }
@@ -430,6 +491,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: quota.fiveHour,
           weekly: quota.weekly,
+          additionalPools: quota.additionalPools,
           error: null,
         }
 
@@ -455,6 +517,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: null,
           weekly: null,
+          additionalPools: [],
           alert: null,
           error:
             error instanceof Error ? error.message : "Quota request failed",

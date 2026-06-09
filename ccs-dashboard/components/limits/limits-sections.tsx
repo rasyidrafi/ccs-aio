@@ -1,5 +1,6 @@
 "use client"
 
+import { Fragment } from "react"
 import { Activity, AlertTriangle, RefreshCw } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -22,7 +23,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import type { LimitsAlert, LimitsPayload } from "@/lib/types"
+import type { LimitsAccountRow, LimitsAlert, LimitsPayload } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
   TABLE_PANEL_HEIGHT,
@@ -133,6 +134,27 @@ function QuotaCell({
   )
 }
 
+function isProPlan(planType: string | null): boolean {
+  const value = planType?.toLowerCase() ?? ""
+  return value === "pro" || value === "prolite"
+}
+
+function getSparkPool(account: LimitsAccountRow) {
+  return account.additionalPools.find(
+    (pool) => pool.displayLabel === "Codex Spark"
+  )
+}
+
+function shouldMergeResetCell(account: LimitsAccountRow): boolean {
+  const sparkPool = getSparkPool(account)
+  if (!sparkPool) return false
+
+  return (
+    (account.weekly?.resetAfterSeconds ?? null) ===
+    (sparkPool.weekly?.resetAfterSeconds ?? null)
+  )
+}
+
 export function AlertsPanel({
   limits,
   refreshing,
@@ -225,75 +247,144 @@ export function LimitsTable({
                   </TableCell>
                 </TableRow>
               ) : (
-                limits.accounts.map((account, index) => (
-                  <TableRow key={account.id} className="align-top">
-                    <TableCell className="text-center font-mono text-muted-foreground">
-                      {index + 1}
-                    </TableCell>
-                    <TableCell className="min-w-[220px]">
-                      <div className="space-y-1">
-                        <div className="font-medium">{account.displayName}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {account.email || account.sourceLabel}
-                        </div>
-                        {account.error ? (
-                          <div className="text-xs text-destructive">
-                            {account.error}
+                limits.accounts.map((account, index) => {
+                  const sparkPool = isProPlan(account.planType)
+                    ? getSparkPool(account)
+                    : undefined
+                  const rowSpan = sparkPool ? 2 : 1
+                  const mergeResetCell = sparkPool
+                    ? shouldMergeResetCell(account)
+                    : false
+
+                  return (
+                    <Fragment key={account.id}>
+                      <TableRow className="align-top">
+                        <TableCell
+                          rowSpan={rowSpan}
+                          className="text-center font-mono text-muted-foreground"
+                        >
+                          {index + 1}
+                        </TableCell>
+                        <TableCell rowSpan={rowSpan} className="min-w-[220px]">
+                          <div className="space-y-1">
+                            <div className="font-medium">{account.displayName}</div>
+                            <div className="text-xs text-muted-foreground">
+                              {account.email || account.sourceLabel}
+                            </div>
+                            {sparkPool ? (
+                              <div className="text-xs text-muted-foreground">
+                                Includes separate Spark pool
+                              </div>
+                            ) : null}
+                            {account.error ? (
+                              <div className="text-xs text-destructive">
+                                {account.error}
+                              </div>
+                            ) : null}
                           </div>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={getStatusBadgeVariant(account.status)}>
-                        {getStatusLabel(account.status)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={getPlanBadgeVariant(account.planType)}
-                        className={getPlanBadgeClassName(account.planType)}
-                      >
-                        {formatPlanLabel(account.planType)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <QuotaCell
-                        label="5 hour"
-                        remaining={account.fiveHour?.remainingPercent ?? null}
-                        used={account.fiveHour?.usedPercent ?? null}
-                        resetAfterSeconds={
-                          account.fiveHour?.resetAfterSeconds ?? null
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <QuotaCell
-                        label="Weekly"
-                        remaining={account.weekly?.remainingPercent ?? null}
-                        used={account.weekly?.usedPercent ?? null}
-                        resetAfterSeconds={
-                          account.weekly?.resetAfterSeconds ?? null
-                        }
-                      />
-                    </TableCell>
-                    <TableCell className="w-[88px] text-center text-sm text-muted-foreground tabular-nums">
-                      {account.weekly
-                        ? formatRelativeSeconds(
-                            account.weekly.resetAfterSeconds
-                          )
-                        : "Unknown"}
-                    </TableCell>
-                    <TableCell className="w-[88px] text-center tabular-nums">
-                      {formatNumber(account.successCount)}
-                    </TableCell>
-                    <TableCell className="w-[88px] text-center tabular-nums">
-                      {formatNumber(account.failureCount)}
-                    </TableCell>
-                    <TableCell className="min-w-[110px] text-sm text-muted-foreground">
-                      {formatDateTime(account.updatedAt)}
-                    </TableCell>
-                  </TableRow>
-                ))
+                        </TableCell>
+                        <TableCell rowSpan={rowSpan}>
+                          <Badge variant={getStatusBadgeVariant(account.status)}>
+                            {getStatusLabel(account.status)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell rowSpan={rowSpan}>
+                          <Badge
+                            variant={getPlanBadgeVariant(account.planType)}
+                            className={getPlanBadgeClassName(account.planType)}
+                          >
+                            {formatPlanLabel(account.planType)}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <QuotaCell
+                            label="5 hour"
+                            remaining={account.fiveHour?.remainingPercent ?? null}
+                            used={account.fiveHour?.usedPercent ?? null}
+                            resetAfterSeconds={
+                              account.fiveHour?.resetAfterSeconds ?? null
+                            }
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <QuotaCell
+                            label="Weekly"
+                            remaining={account.weekly?.remainingPercent ?? null}
+                            used={account.weekly?.usedPercent ?? null}
+                            resetAfterSeconds={
+                              account.weekly?.resetAfterSeconds ?? null
+                            }
+                          />
+                        </TableCell>
+                        {mergeResetCell ? (
+                          <TableCell
+                            rowSpan={2}
+                            className="w-[88px] text-center text-sm text-muted-foreground tabular-nums"
+                          >
+                            {account.weekly
+                              ? formatRelativeSeconds(
+                                  account.weekly.resetAfterSeconds
+                                )
+                              : "Unknown"}
+                          </TableCell>
+                        ) : (
+                          <TableCell className="w-[88px] text-center text-sm text-muted-foreground tabular-nums">
+                            {account.weekly
+                              ? formatRelativeSeconds(
+                                  account.weekly.resetAfterSeconds
+                                )
+                              : "Unknown"}
+                          </TableCell>
+                        )}
+                        <TableCell rowSpan={rowSpan} className="w-[88px] text-center tabular-nums">
+                          {formatNumber(account.successCount)}
+                        </TableCell>
+                        <TableCell rowSpan={rowSpan} className="w-[88px] text-center tabular-nums">
+                          {formatNumber(account.failureCount)}
+                        </TableCell>
+                        <TableCell
+                          rowSpan={rowSpan}
+                          className="min-w-[110px] text-sm text-muted-foreground"
+                        >
+                          {formatDateTime(account.updatedAt)}
+                        </TableCell>
+                      </TableRow>
+                      {sparkPool ? (
+                        <TableRow className="align-top bg-muted/20">
+                          <TableCell>
+                            <QuotaCell
+                              label="Codex Spark (5h)"
+                              remaining={sparkPool.fiveHour?.remainingPercent ?? null}
+                              used={sparkPool.fiveHour?.usedPercent ?? null}
+                              resetAfterSeconds={
+                                sparkPool.fiveHour?.resetAfterSeconds ?? null
+                              }
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <QuotaCell
+                              label="Codex Spark (weekly)"
+                              remaining={sparkPool.weekly?.remainingPercent ?? null}
+                              used={sparkPool.weekly?.usedPercent ?? null}
+                              resetAfterSeconds={
+                                sparkPool.weekly?.resetAfterSeconds ?? null
+                              }
+                            />
+                          </TableCell>
+                          {mergeResetCell ? null : (
+                            <TableCell className="w-[88px] text-center text-sm text-muted-foreground tabular-nums">
+                              {sparkPool.weekly
+                                ? formatRelativeSeconds(
+                                    sparkPool.weekly.resetAfterSeconds
+                                  )
+                                : "Unknown"}
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      ) : null}
+                    </Fragment>
+                  )
+                })
               )}
             </TableBody>
           </Table>

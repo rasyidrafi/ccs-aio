@@ -103,6 +103,13 @@ export interface LimitsQuotaWindow {
   resetAfterSeconds: number | null
 }
 
+export interface LimitsAdditionalPool {
+  featureLabel: string
+  displayLabel: string
+  fiveHour: LimitsQuotaWindow | null
+  weekly: LimitsQuotaWindow | null
+}
+
 export interface LimitsAlert {
   id: string
   severity: AlertSeverity
@@ -123,6 +130,7 @@ export interface LimitsAccountRow {
   updatedAt: string | null
   fiveHour: LimitsQuotaWindow | null
   weekly: LimitsQuotaWindow | null
+  additionalPools: LimitsAdditionalPool[]
   alert: LimitsAlert | null
   error: string | null
 }
