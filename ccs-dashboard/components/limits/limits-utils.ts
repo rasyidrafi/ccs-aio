@@ -53,6 +53,8 @@ export function getStatusBadgeVariant(
   switch (status) {
     case "active":
       return "secondary"
+    case "paused":
+      return "outline"
     case "expired":
       return "outline"
     default:
@@ -62,6 +64,7 @@ export function getStatusBadgeVariant(
 
 export function getStatusLabel(status: LimitsAccountRow["status"]): string {
   if (status === "active") return "Active"
+  if (status === "paused") return "Paused"
   if (status === "expired") return "Expired"
   return "Error"
 }

@@ -42,6 +42,22 @@ type CliproxyConfig = {
   "auth-dir"?: string
 }
 
+type AccountsRegistry = {
+  providers?: {
+    codex?: {
+      accounts?: Record<
+        string,
+        {
+          email?: string
+          tokenFile?: string
+          paused?: boolean
+          pausedAt?: string
+        }
+      >
+    }
+  }
+}
+
 type AuthFileApiEntry = {
   account?: string
   email?: string
@@ -109,6 +125,8 @@ type LimitsContext = {
   managementUrl: string
   managementSecret: string
   authDir: string
+  pausedAuthDir: string
+  accountsRegistryPath: string
 }
 
 type CacheEntry = {
@@ -174,6 +192,8 @@ async function resolveContext(): Promise<LimitsContext> {
       unifiedConfig?.cliproxy?.auth?.management_secret?.trim() ||
       DEFAULT_MANAGEMENT_SECRET,
     authDir,
+    pausedAuthDir: path.join(path.dirname(authDir), "auth-paused"),
+    accountsRegistryPath: path.join(path.dirname(authDir), "accounts.json"),
   }
 }
 
@@ -205,7 +225,8 @@ async function fetchManagementAuthFiles(
 }
 
 async function scanLocalCodexAuthFiles(
-  authDir: string
+  authDir: string,
+  status?: string
 ): Promise<AuthFileApiEntry[]> {
   try {
     const names = await readdir(authDir)
@@ -215,10 +236,51 @@ async function scanLocalCodexAuthFiles(
         name,
         path: path.join(authDir, name),
         provider: "codex",
+        status,
       }))
   } catch {
     return []
   }
+}
+
+function mergeAuthFileEntries(
+  discovered: AuthFileApiEntry[],
+  localEntries: AuthFileApiEntry[]
+): AuthFileApiEntry[] {
+  const merged = new Map<string, AuthFileApiEntry>()
+
+  for (const entry of [...localEntries, ...discovered]) {
+    const filePath = entry.path || ""
+    const name = entry.name || ""
+    const key = filePath || name
+    if (!key) continue
+
+    const current = merged.get(key)
+    merged.set(key, {
+      ...current,
+      ...entry,
+      path: entry.path || current?.path,
+      name: entry.name || current?.name,
+      provider: entry.provider || current?.provider || "codex",
+      status: entry.status || current?.status,
+    })
+  }
+
+  return Array.from(merged.values())
+}
+
+async function readPausedTokenFiles(
+  registryPath: string
+): Promise<Set<string>> {
+  const registry = parseJsonText<AccountsRegistry>(await readUtf8(registryPath))
+  const accounts = registry?.providers?.codex?.accounts
+  if (!accounts) return new Set()
+
+  const pausedFiles = Object.values(accounts)
+    .filter((account) => account.paused && account.tokenFile)
+    .map((account) => account.tokenFile as string)
+
+  return new Set(pausedFiles)
 }
 
 function isExpired(expiresAt: string | null | undefined): boolean {
@@ -405,6 +467,16 @@ function buildAlert(account: {
 
 function sortAccounts(accounts: LimitsAccountRow[]): LimitsAccountRow[] {
   return accounts.sort((left, right) => {
+    const statusOrder: Record<LimitsAccountRow["status"], number> = {
+      active: 0,
+      expired: 1,
+      error: 2,
+      paused: 3,
+    }
+    const leftStatus = statusOrder[left.status]
+    const rightStatus = statusOrder[right.status]
+    if (leftStatus !== rightStatus) return leftStatus - rightStatus
+
     const leftAlert = left.alert ? 1 : 0
     const rightAlert = right.alert ? 1 : 0
     if (rightAlert !== leftAlert) return rightAlert - leftAlert
@@ -426,10 +498,18 @@ export async function getLimitsPayload(
 
   const ctx = await resolveContext()
   const discovered = await fetchManagementAuthFiles(ctx)
-  const sourceFiles =
-    discovered.length > 0
-      ? discovered
-      : await scanLocalCodexAuthFiles(ctx.authDir)
+  const [activeEntries, pausedEntries, pausedTokenFiles] = await Promise.all([
+    scanLocalCodexAuthFiles(ctx.authDir, "active"),
+    scanLocalCodexAuthFiles(ctx.pausedAuthDir, "paused"),
+    readPausedTokenFiles(ctx.accountsRegistryPath),
+  ])
+  const sourceFiles = mergeAuthFileEntries(discovered, [
+    ...activeEntries,
+    ...pausedEntries.map((entry) => ({
+      ...entry,
+      status: "paused",
+    })),
+  ])
 
   const accounts = await Promise.all(
     sourceFiles.map(async (entry): Promise<LimitsAccountRow> => {
@@ -479,12 +559,16 @@ export async function getLimitsPayload(
 
       try {
         const quota = await fetchCodexQuota(auth)
+        const status: LimitsAccountRow["status"] =
+          entry.status === "paused" || pausedTokenFiles.has(sourceLabel)
+            ? "paused"
+            : "active"
         const rowBase = {
           id: sourceLabel,
           email: identity.email,
           displayName: identity.displayName,
           planType: quota.planType,
-          status: "active" as const,
+          status,
           sourceLabel,
           successCount: entry.success ?? 0,
           failureCount: entry.failed ?? 0,

@@ -7,7 +7,7 @@ import {
   Clock3,
   KeyRound,
   ShieldAlert,
-  TimerReset,
+  PauseCircle,
 } from "lucide-react"
 
 import { ThemeProvider } from "@/components/theme-provider"
@@ -37,6 +37,11 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
   const expiredCount = useMemo(
     () =>
       limits.accounts.filter((account) => account.status === "expired").length,
+    [limits]
+  )
+  const pausedCount = useMemo(
+    () =>
+      limits.accounts.filter((account) => account.status === "paused").length,
     [limits]
   )
   const errorCount = useMemo(
@@ -114,22 +119,22 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
                 Inventory
               </h2>
               <p className="text-sm text-muted-foreground">
-                Status mix and latest snapshot.
+                Status mix across discovered Codex accounts.
               </p>
             </div>
             <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-4">
-              <SummaryCard
-                title="Latest snapshot"
-                value={formatDateTime(limits.generatedAt)}
-                detail="Last successful quota snapshot."
-                icon={TimerReset}
-                refreshing={isRefreshing}
-              />
               <SummaryCard
                 title="Healthy"
                 value={formatNumber(healthyCount)}
                 detail="Accounts returning live quota normally."
                 icon={Activity}
+                refreshing={isRefreshing}
+              />
+              <SummaryCard
+                title="Paused"
+                value={formatNumber(pausedCount)}
+                detail="Accounts paused in CCS but still showing quota."
+                icon={PauseCircle}
                 refreshing={isRefreshing}
               />
               <SummaryCard

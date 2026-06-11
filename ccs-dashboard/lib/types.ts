@@ -123,7 +123,7 @@ export interface LimitsAccountRow {
   email: string
   displayName: string
   planType: string | null
-  status: "active" | "expired" | "error"
+  status: "active" | "paused" | "expired" | "error"
   sourceLabel: string
   successCount: number
   failureCount: number
