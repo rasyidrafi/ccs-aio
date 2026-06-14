@@ -36,6 +36,19 @@ interface LiveUsageResponse {
   };
 }
 
+interface UsageQueueRecord {
+  timestamp?: unknown;
+  provider?: unknown;
+  model?: unknown;
+  alias?: unknown;
+  tokens?: {
+    input_tokens?: unknown;
+    output_tokens?: unknown;
+    cached_tokens?: unknown;
+  } | null;
+  failed?: unknown;
+}
+
 const PRICING: Record<
   string,
   { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }
@@ -187,6 +200,49 @@ export function normalizeLiveResponse(payload: LiveUsageResponse): UsageEventRec
       }
     }
   }
+  return events;
+}
+
+export function normalizeUsageQueueResponse(records: unknown[]): UsageEventRecord[] {
+  const events: UsageEventRecord[] = [];
+
+  for (const rawRecord of records) {
+    const record = rawRecord as UsageQueueRecord | null;
+    if (!record || typeof record !== 'object') {
+      continue;
+    }
+
+    const providerKey =
+      typeof record.provider === 'string' ? record.provider.trim() : '';
+    const model =
+      typeof record.model === 'string' && record.model.trim()
+        ? record.model.trim()
+        : typeof record.alias === 'string'
+          ? record.alias.trim()
+          : '';
+    const timestamp =
+      typeof record.timestamp === 'string' ? record.timestamp.trim() : '';
+    const inputTokens = toNumber(record.tokens?.input_tokens);
+    const outputTokens = toNumber(record.tokens?.output_tokens);
+    const cacheReadTokens = toNumber(record.tokens?.cached_tokens);
+
+    const event = normalizeBase(
+      'live',
+      providerKey,
+      model,
+      timestamp,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      1,
+      calculateCost(model, inputTokens, outputTokens, cacheReadTokens),
+      record.failed === true
+    );
+    if (event) {
+      events.push(event);
+    }
+  }
+
   return events;
 }
 

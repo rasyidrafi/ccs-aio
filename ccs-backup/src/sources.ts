@@ -1,10 +1,19 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import type { ResolvedConfig } from '@/config';
-import { mergeEvents, normalizeLiveResponse, normalizeSnapshotDetails } from '@/events';
+import {
+  mergeEvents,
+  normalizeLiveResponse,
+  normalizeSnapshotDetails,
+  normalizeUsageQueueResponse,
+} from '@/events';
 import type { SyncSourceResult, UsageEventRecord } from '@/types';
 
 export type SyncSourceMode = 'live' | 'snapshot' | 'all';
+
+const USAGE_QUEUE_BATCH_SIZE = 1000;
+const USAGE_QUEUE_MAX_BATCHES = 100;
+const USAGE_QUEUE_DRAIN_TIMEOUT_MS = 30_000;
 
 interface SnapshotPayload {
   details?: Array<{
@@ -44,13 +53,71 @@ async function fetchJson<T>(url: string, secret: string): Promise<T> {
   }
 }
 
-export async function loadLiveSource(config: ResolvedConfig): Promise<SyncSourceResult> {
-  try {
-    const payload = await fetchJson<unknown>(
-      `${config.managementUrl}/v0/management/usage`,
+async function loadLegacyLiveEvents(config: ResolvedConfig): Promise<UsageEventRecord[]> {
+  const payload = await fetchJson<unknown>(
+    `${config.managementUrl}/v0/management/usage`,
+    config.managementSecret
+  );
+  return normalizeLiveResponse(payload as any);
+}
+
+async function loadUsageQueueEvents(config: ResolvedConfig): Promise<UsageEventRecord[]> {
+  const records: unknown[] = [];
+  const seenFullBatchSignatures = new Set<string>();
+  const drainStartedAt = Date.now();
+
+  for (let batchCount = 0; batchCount < USAGE_QUEUE_MAX_BATCHES; batchCount += 1) {
+    const batch = await fetchJson<unknown[]>(
+      `${config.managementUrl}/v0/management/usage-queue?count=${USAGE_QUEUE_BATCH_SIZE}`,
       config.managementSecret
     );
-    const events = normalizeLiveResponse(payload as any);
+
+    if (!Array.isArray(batch)) {
+      throw new Error('usage-queue did not return an array');
+    }
+
+    if (batch.length === USAGE_QUEUE_BATCH_SIZE) {
+      const signature = JSON.stringify(batch);
+      if (seenFullBatchSignatures.has(signature)) {
+        throw new Error('usage-queue repeated a full batch while draining');
+      }
+      seenFullBatchSignatures.add(signature);
+    }
+
+    records.push(...batch);
+
+    if (batch.length < USAGE_QUEUE_BATCH_SIZE) {
+      return normalizeUsageQueueResponse(records);
+    }
+
+    if (Date.now() - drainStartedAt >= USAGE_QUEUE_DRAIN_TIMEOUT_MS) {
+      throw new Error('usage-queue draining exceeded timeout');
+    }
+  }
+
+  throw new Error('usage-queue exceeded maximum drain batches');
+}
+
+export async function loadLiveSource(config: ResolvedConfig): Promise<SyncSourceResult> {
+  const errors: string[] = [];
+
+  try {
+    const events = await loadLegacyLiveEvents(config);
+    if (events.length > 0) {
+      return {
+        source: 'live',
+        ok: true,
+        eventCount: events.length,
+        events,
+      };
+    }
+    errors.push('legacy usage endpoint returned no request details');
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : 'Unknown legacy live source error');
+  }
+
+  try {
+    const events = await loadUsageQueueEvents(config);
     return {
       source: 'live',
       ok: true,
@@ -58,14 +125,16 @@ export async function loadLiveSource(config: ResolvedConfig): Promise<SyncSource
       events,
     };
   } catch (error) {
-    return {
-      source: 'live',
-      ok: false,
-      eventCount: 0,
-      events: [],
-      message: error instanceof Error ? error.message : 'Unknown live source error',
-    };
+    errors.push(error instanceof Error ? error.message : 'Unknown usage-queue source error');
   }
+
+  return {
+    source: 'live',
+    ok: false,
+    eventCount: 0,
+    events: [],
+    message: errors.join('; '),
+  };
 }
 
 export async function loadSnapshotSource(config: ResolvedConfig): Promise<SyncSourceResult> {
