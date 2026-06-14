@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { SourceKind, UsageEventRecord } from '@/types';
 
 interface SnapshotDetail {
@@ -41,6 +43,7 @@ interface UsageQueueRecord {
   provider?: unknown;
   model?: unknown;
   alias?: unknown;
+  api_key?: unknown;
   tokens?: {
     input_tokens?: unknown;
     output_tokens?: unknown;
@@ -81,6 +84,28 @@ const PRICING_ALIASES: Record<string, string> = {
 function toNumber(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function toTrimmedString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function hashApiKey(apiKey: string): string {
+  return createHash('sha256').update(apiKey).digest('hex').slice(0, 8);
+}
+
+function queueRecordProviderKey(record: UsageQueueRecord): string {
+  const rawApiKey = toTrimmedString(record.api_key);
+  if (rawApiKey) {
+    return `api-key:${hashApiKey(rawApiKey)}`;
+  }
+
+  const provider = toTrimmedString(record.provider);
+  if (provider.startsWith('api-key:')) {
+    return provider;
+  }
+
+  return '';
 }
 
 function calculateCost(model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number): number {
@@ -212,8 +237,7 @@ export function normalizeUsageQueueResponse(records: unknown[]): UsageEventRecor
       continue;
     }
 
-    const providerKey =
-      typeof record.provider === 'string' ? record.provider.trim() : '';
+    const providerKey = queueRecordProviderKey(record);
     const model =
       typeof record.model === 'string' && record.model.trim()
         ? record.model.trim()
