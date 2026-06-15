@@ -49,7 +49,8 @@ export function getAllBudgets(): BudgetRow[] {
 
 export function getBudget(hash: string): BudgetRow | null {
   const d = getBudgetDb();
-  return d.query("SELECT * FROM budgets WHERE api_key_hash = ?").get(hash) as BudgetRow | null;
+  const rows = d.query("SELECT * FROM budgets WHERE api_key_hash = ?").all(hash) as BudgetRow[];
+  return rows[0] ?? null;
 }
 
 export function upsertBudget(
@@ -69,11 +70,7 @@ export function upsertBudget(
        next_reset_date = excluded.next_reset_date,
        enabled = excluded.enabled,
        updated_at = datetime('now')`,
-    hash,
-    weeklyLimitUsd,
-    weekStartDate,
-    nextResetDate,
-    enabled ? 1 : 0
+    [hash, weeklyLimitUsd, weekStartDate, nextResetDate, enabled ? 1 : 0]
   );
   return getBudget(hash)!;
 }
@@ -85,8 +82,7 @@ export function updateResetDate(hash: string, nextResetDate: string): BudgetRow 
 
   d.run(
     `UPDATE budgets SET next_reset_date = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
-    nextResetDate,
-    hash
+    [nextResetDate, hash]
   );
   return getBudget(hash);
 }
@@ -98,15 +94,26 @@ export function setBudgetEnabled(hash: string, enabled: boolean): BudgetRow | nu
 
   d.run(
     `UPDATE budgets SET enabled = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
-    enabled ? 1 : 0,
-    hash
+    [enabled ? 1 : 0, hash]
+  );
+  return getBudget(hash);
+}
+
+export function updateLimit(hash: string, limitUsd: number): BudgetRow | null {
+  const d = getBudgetDb();
+  const existing = getBudget(hash);
+  if (!existing) return null;
+
+  d.run(
+    `UPDATE budgets SET weekly_limit_usd = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
+    [limitUsd, hash]
   );
   return getBudget(hash);
 }
 
 export function deleteBudget(hash: string): boolean {
   const d = getBudgetDb();
-  const result = d.run("DELETE FROM budgets WHERE api_key_hash = ?", hash);
+  const result = d.run("DELETE FROM budgets WHERE api_key_hash = ?", [hash]);
   return result.changes > 0;
 }
 
@@ -124,9 +131,7 @@ export function autoAdvanceWeek(budget: BudgetRow): BudgetRow {
 
   d.run(
     `UPDATE budgets SET week_start_date = ?, next_reset_date = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
-    newWeekStart,
-    newNextReset,
-    budget.api_key_hash
+    [newWeekStart, newNextReset, budget.api_key_hash]
   );
   return {
     ...budget,

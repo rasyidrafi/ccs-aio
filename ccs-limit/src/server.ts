@@ -1,3 +1,8 @@
+import http from "node:http";
+import https from "node:https";
+import { pipeline, Readable } from "node:stream";
+import type { Duplex } from "node:stream";
+import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { config } from "./config";
 import { signJwt, verifyJwt, validateCredentials } from "./auth";
 import { hashApiKey, providerKeyFromApiKey } from "./pricing";
@@ -7,6 +12,7 @@ import {
   upsertBudget,
   updateResetDate,
   setBudgetEnabled,
+  updateLimit,
   deleteBudget,
   autoAdvanceWeek,
   todayDate,
@@ -14,17 +20,146 @@ import {
 } from "./db";
 import { getWeeklyCost } from "./usage";
 import { resolveApiKeys } from "./api-keys";
-import { ok, fail, json, extractBearerToken } from "./response";
+import { ok, fail, extractBearerToken, CORS_HEADERS } from "./response";
 
-function extractApiKey(req: Request): string | null {
-  const auth = req.headers.get("Authorization");
-  if (!auth?.startsWith("Bearer ")) return null;
-  return auth.slice(7).trim() || null;
+type NodeHandler = (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>;
+
+const HOP_BY_HOP_REQUEST_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+]);
+
+const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+function extractApiKeyFromAuthHeader(authHeader: string | undefined): string | null {
+  if (!authHeader?.startsWith("Bearer ")) return null;
+  return authHeader.slice(7).trim() || null;
 }
 
-function getRoutePath(url: string): string {
-  const idx = url.indexOf("?");
-  return idx >= 0 ? url.slice(0, idx) : url;
+function getRoutePath(url: URL): string {
+  return url.pathname;
+}
+
+function shouldSkipBudgetPrecheck(pathname: string): boolean {
+  return pathname === "/" || pathname === "/v1/models";
+}
+
+function requiresBudgetPrecheck(pathname: string): boolean {
+  return !shouldSkipBudgetPrecheck(pathname);
+}
+
+function createNodeRequest(req: http.IncomingMessage): Request {
+  const origin = `http://${req.headers.host || "127.0.0.1"}`;
+  const method = req.method || "GET";
+  const init: RequestInit & { duplex?: "half" } = {
+    method,
+    headers: req.headers as HeadersInit,
+  };
+
+  if (method !== "GET" && method !== "HEAD") {
+    init.body = Readable.toWeb(req) as unknown as BodyInit;
+    init.duplex = "half";
+  }
+
+  return new Request(new URL(req.url || "/", origin), init);
+}
+
+async function writeNodeResponse(res: http.ServerResponse, response: Response): Promise<void> {
+  res.statusCode = response.status;
+  res.statusMessage = response.statusText;
+
+  response.headers.forEach((value, key) => {
+    res.setHeader(key, value);
+  });
+
+  if (!response.body) {
+    res.end();
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    pipeline(
+      Readable.fromWeb(response.body as unknown as NodeReadableStream),
+      res,
+      (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      }
+    );
+  });
+}
+
+function cloneProxyHeaders(
+  headers: http.IncomingHttpHeaders,
+  target: URL,
+  isUpgrade: boolean
+): http.OutgoingHttpHeaders {
+  const outgoing: http.OutgoingHttpHeaders = {};
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    const lowerKey = key.toLowerCase();
+    if (lowerKey === "host") {
+      continue;
+    }
+    if (!isUpgrade && HOP_BY_HOP_REQUEST_HEADERS.has(lowerKey)) {
+      continue;
+    }
+
+    outgoing[key] = value;
+  }
+
+  outgoing.host = target.host;
+  return outgoing;
+}
+
+function writeUpgradeFailure(
+  socket: Duplex,
+  statusCode: number,
+  statusText: string,
+  payload: unknown
+): void {
+  const body = JSON.stringify(payload);
+  socket.write(
+    [
+      `HTTP/1.1 ${statusCode} ${statusText}`,
+      "Content-Type: application/json",
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      "Connection: close",
+      "",
+      body,
+    ].join("\r\n")
+  );
+  socket.destroy();
+}
+
+function proxyErrorPayload(message: string): { error: { message: string; type: string } } {
+  return {
+    error: {
+      message,
+      type: "proxy_error",
+    },
+  };
 }
 
 async function requireAdmin(req: Request): Promise<Response | null> {
@@ -153,10 +288,7 @@ async function handleCreateBudget(req: Request): Promise<Response> {
   return ok(budget);
 }
 
-async function handleUpdateResetDate(
-  hash: string,
-  req: Request
-): Promise<Response> {
+async function handleUpdateResetDate(hash: string, req: Request): Promise<Response> {
   let body: { nextResetDate?: string };
   try {
     body = await req.json();
@@ -181,10 +313,23 @@ async function handleUpdateResetDate(
   return ok(updated);
 }
 
-async function handleToggleBudget(
-  hash: string,
-  req: Request
-): Promise<Response> {
+async function handleUpdateLimit(hash: string, req: Request): Promise<Response> {
+  let body: { weeklyLimitUsd?: number };
+  try {
+    body = await req.json();
+  } catch {
+    return fail("Invalid JSON body");
+  }
+  if (!body.weeklyLimitUsd || body.weeklyLimitUsd <= 0) {
+    return fail("weeklyLimitUsd must be > 0");
+  }
+
+  const updated = updateLimit(hash, body.weeklyLimitUsd);
+  if (!updated) return fail("Budget not found", 404);
+  return ok(updated);
+}
+
+async function handleToggleBudget(hash: string, req: Request): Promise<Response> {
   let body: { enabled?: boolean };
   try {
     body = await req.json();
@@ -219,150 +364,392 @@ async function handleListApiKeys(): Promise<Response> {
   );
 }
 
-async function proxyUpstream(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const upstreamUrl = `${config.upstreamUrl}${url.pathname}${url.search}`;
+async function proxyUpstreamHttp(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): Promise<void> {
+  const target = new URL(req.url || "/", config.upstreamUrl);
+  const transport = target.protocol === "https:" ? https : http;
 
-  const headers = new Headers(req.headers);
-  headers.delete("host");
+  await new Promise<void>((resolve) => {
+    const upstreamReq = transport.request(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port || undefined,
+        method: req.method,
+        path: `${target.pathname}${target.search}`,
+        headers: cloneProxyHeaders(req.headers, target, false),
+      },
+      (upstreamRes) => {
+        for (const [key, value] of Object.entries(upstreamRes.headers)) {
+          if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())) {
+            continue;
+          }
+          res.setHeader(key, value);
+        }
 
-  try {
-    const upstreamResp = await fetch(upstreamUrl, {
-      method: req.method,
-      headers,
-      body: req.body,
-      duplex: "half",
-    } as RequestInit);
-
-    const respHeaders = new Headers(upstreamResp.headers);
-    respHeaders.delete("transfer-encoding");
-
-    return new Response(upstreamResp.body, {
-      status: upstreamResp.status,
-      statusText: upstreamResp.statusText,
-      headers: respHeaders,
-    });
-  } catch (err) {
-    return new Response(
-      JSON.stringify({
-        error: {
-          message: `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`,
-          type: "proxy_error",
-        },
-      }),
-      { status: 502, headers: { "Content-Type": "application/json" } }
+        res.writeHead(upstreamRes.statusCode || 502, upstreamRes.statusMessage);
+        pipeline(upstreamRes, res, () => resolve());
+      }
     );
-  }
+
+    upstreamReq.on("error", (err) => {
+      if (!res.headersSent) {
+        const body = JSON.stringify(
+          proxyErrorPayload(
+            `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`
+          )
+        );
+        res.writeHead(502, {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        });
+        res.end(body);
+      } else {
+        res.destroy(err);
+      }
+      resolve();
+    });
+
+    req.on("aborted", () => upstreamReq.destroy());
+    res.on("close", () => upstreamReq.destroy());
+    pipeline(req, upstreamReq, () => {});
+  });
 }
 
-async function handleForward(req: Request): Promise<Response> {
-  const apiKey = extractApiKey(req);
-  if (!apiKey) {
-    return new Response(
-      JSON.stringify({ error: { message: "Missing API key", type: "invalid_request_error" } }),
-      { status: 401, headers: { "Content-Type": "application/json" } }
+function proxyUpstreamUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+  const target = new URL(req.url || "/", config.upstreamUrl);
+  const transport = target.protocol === "https:" ? https : http;
+
+  const upstreamReq = transport.request({
+    protocol: target.protocol,
+    hostname: target.hostname,
+    port: target.port || undefined,
+    method: req.method,
+    path: `${target.pathname}${target.search}`,
+    headers: cloneProxyHeaders(req.headers, target, true),
+  });
+
+  const closeSockets = () => {
+    if (!socket.destroyed) {
+      socket.destroy();
+    }
+  };
+
+  upstreamReq.on("upgrade", (upstreamRes, upstreamSocket, upstreamHead) => {
+    const lines = [`HTTP/${upstreamRes.httpVersion} 101 ${upstreamRes.statusMessage || "Switching Protocols"}`];
+    for (const [key, value] of Object.entries(upstreamRes.headers)) {
+      if (value === undefined) {
+        continue;
+      }
+      if (Array.isArray(value)) {
+        for (const entry of value) {
+          lines.push(`${key}: ${entry}`);
+        }
+      } else {
+        lines.push(`${key}: ${value}`);
+      }
+    }
+    lines.push("", "");
+    socket.write(lines.join("\r\n"));
+
+    if (head.length > 0) {
+      upstreamSocket.write(head);
+    }
+    if (upstreamHead.length > 0) {
+      socket.write(upstreamHead);
+    }
+
+    upstreamSocket.on("error", closeSockets);
+    socket.on("error", () => upstreamSocket.destroy());
+    socket.on("close", () => upstreamSocket.destroy());
+    upstreamSocket.on("close", () => closeSockets());
+
+    upstreamSocket.pipe(socket);
+    socket.pipe(upstreamSocket);
+  });
+
+  upstreamReq.on("response", (upstreamRes) => {
+    const bodyChunks: Buffer[] = [];
+    upstreamRes.on("data", (chunk) => {
+      bodyChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    upstreamRes.on("end", () => {
+      const body = Buffer.concat(bodyChunks);
+      const lines = [`HTTP/${upstreamRes.httpVersion} ${upstreamRes.statusCode || 502} ${upstreamRes.statusMessage || "Bad Gateway"}`];
+      for (const [key, value] of Object.entries(upstreamRes.headers)) {
+        if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())) {
+          continue;
+        }
+        if (Array.isArray(value)) {
+          for (const entry of value) {
+            lines.push(`${key}: ${entry}`);
+          }
+        } else {
+          lines.push(`${key}: ${value}`);
+        }
+      }
+      lines.push(`Content-Length: ${body.length}`, "Connection: close", "", "");
+      socket.write(lines.join("\r\n"));
+      if (body.length > 0) {
+        socket.write(body);
+      }
+      closeSockets();
+    });
+  });
+
+  upstreamReq.on("error", (err) => {
+    writeUpgradeFailure(
+      socket,
+      502,
+      "Bad Gateway",
+      proxyErrorPayload(
+        `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`
+      )
     );
+  });
+
+  upstreamReq.end();
+}
+
+function imitateCodexLimitResponse(resetDateStr?: string | null): Response {
+  let resets_at: number;
+  let resets_in_seconds: number;
+
+  const now = Date.now();
+
+  if (resetDateStr) {
+    const d = new Date(resetDateStr + "T00:00:00Z");
+    resets_at = Math.floor(d.getTime() / 1000);
+    resets_in_seconds = Math.max(0, Math.floor((d.getTime() - now) / 1000));
+  } else {
+    resets_at = Math.floor(now / 1000) + 86400 * 365;
+    resets_in_seconds = 86400 * 365;
+  }
+
+  return new Response(
+    JSON.stringify({
+      error: {
+        type: "usage_limit_reached",
+        message: "The usage limit has been reached",
+        plan_type: "team",
+        resets_at,
+        eligible_promo: null,
+        resets_in_seconds,
+      },
+    }),
+    { status: 429, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+  );
+}
+
+async function handleForward(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const apiKey = extractApiKeyFromAuthHeader(
+    typeof req.headers.authorization === "string" ? req.headers.authorization : undefined
+  );
+  if (!apiKey) {
+    await writeNodeResponse(
+      res,
+      new Response(
+        JSON.stringify({ error: { message: "Missing API key", type: "invalid_request_error" } }),
+        { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      )
+    );
+    return;
   }
 
   const hash = hashApiKey(apiKey);
   let budget = getBudget(hash);
 
-  if (budget && budget.enabled) {
+  if (!budget || !budget.enabled) {
+    await writeNodeResponse(res, imitateCodexLimitResponse());
+    return;
+  }
+
+  budget = autoAdvanceWeek(budget);
+  const providerKey = providerKeyFromApiKey(apiKey);
+  const spent = getWeeklyCost(providerKey, budget.week_start_date, budget.next_reset_date);
+
+  if (spent >= budget.weekly_limit_usd) {
+    await writeNodeResponse(res, imitateCodexLimitResponse(budget.next_reset_date));
+    return;
+  }
+
+  await proxyUpstreamHttp(req, res);
+}
+
+const handleHttpRequest: NodeHandler = async (req, res) => {
+  const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+  const path = getRoutePath(url);
+  const method = req.method || "GET";
+
+  if (path.startsWith("/api/") && method === "OPTIONS") {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
+
+  if (path.startsWith("/api/")) {
+    const webReq = createNodeRequest(req);
+
+    if (path === "/api/auth/login" && method === "POST") {
+      await writeNodeResponse(res, await handleLogin(webReq));
+      return;
+    }
+
+    const authErr = await requireAdmin(webReq);
+    if (authErr) {
+      await writeNodeResponse(res, authErr);
+      return;
+    }
+
+    if (path === "/api/budgets" && method === "GET") {
+      await writeNodeResponse(res, await handleListBudgets());
+      return;
+    }
+    if (path === "/api/budgets" && method === "POST") {
+      await writeNodeResponse(res, await handleCreateBudget(webReq));
+      return;
+    }
+
+    const budgetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)$/);
+    if (budgetMatch) {
+      const hash = budgetMatch[1];
+      if (method === "GET") {
+        await writeNodeResponse(res, await handleGetBudget(hash));
+        return;
+      }
+      if (method === "DELETE") {
+        await writeNodeResponse(res, await handleDeleteBudget(hash));
+        return;
+      }
+    }
+
+    const resetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/reset-date$/);
+    if (resetMatch && method === "PUT") {
+      await writeNodeResponse(res, await handleUpdateResetDate(resetMatch[1], webReq));
+      return;
+    }
+
+    const limitMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/limit$/);
+    if (limitMatch && method === "PUT") {
+      await writeNodeResponse(res, await handleUpdateLimit(limitMatch[1], webReq));
+      return;
+    }
+
+    const toggleMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/enabled$/);
+    if (toggleMatch && method === "PUT") {
+      await writeNodeResponse(res, await handleToggleBudget(toggleMatch[1], webReq));
+      return;
+    }
+
+    if (path === "/api/keys" && method === "GET") {
+      await writeNodeResponse(res, await handleListApiKeys());
+      return;
+    }
+
+    await writeNodeResponse(res, fail("Not found", 404));
+    return;
+  }
+
+  if (path === "/health") {
+    await writeNodeResponse(res, ok({ status: "ok", upstream: config.upstreamUrl }));
+    return;
+  }
+
+  if (shouldSkipBudgetPrecheck(path)) {
+    await proxyUpstreamHttp(req, res);
+    return;
+  }
+
+  await handleForward(req, res);
+};
+
+const server = http.createServer((req, res) => {
+  void handleHttpRequest(req, res).catch(async (error) => {
+    if (res.headersSent) {
+      res.destroy(error instanceof Error ? error : undefined);
+      return;
+    }
+
+    await writeNodeResponse(
+      res,
+      new Response(
+        JSON.stringify(
+          proxyErrorPayload(
+            `Unhandled proxy failure: ${error instanceof Error ? error.message : String(error)}`
+          )
+        ),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      )
+    );
+  });
+});
+
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+  const path = getRoutePath(url);
+
+  if (requiresBudgetPrecheck(path)) {
+    const authHeader =
+      typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
+    const apiKey = extractApiKeyFromAuthHeader(authHeader);
+    if (!apiKey) {
+      writeUpgradeFailure(
+        socket,
+        401,
+        "Unauthorized",
+        { error: { message: "Missing API key", type: "invalid_request_error" } }
+      );
+      return;
+    }
+
+    const hash = hashApiKey(apiKey);
+    let budget = getBudget(hash);
+
+    if (!budget || !budget.enabled) {
+      writeUpgradeFailure(
+        socket,
+        429,
+        "Too Many Requests",
+        {
+          error: {
+            type: "usage_limit_reached",
+            message: "The usage limit has been reached",
+          },
+        }
+      );
+      return;
+    }
+
     budget = autoAdvanceWeek(budget);
     const providerKey = providerKeyFromApiKey(apiKey);
     const spent = getWeeklyCost(providerKey, budget.week_start_date, budget.next_reset_date);
 
     if (spent >= budget.weekly_limit_usd) {
-      return new Response(
-        JSON.stringify({
+      writeUpgradeFailure(
+        socket,
+        429,
+        "Too Many Requests",
+        {
           error: {
-            message: `Weekly budget exceeded. Used $${spent.toFixed(2)} of $${budget.weekly_limit_usd.toFixed(2)} limit. Resets on ${budget.next_reset_date}.`,
-            type: "budget_exceeded",
-            budget_usd: budget.weekly_limit_usd,
-            spent_usd: spent,
-            remaining_usd: 0,
-            resets_on: budget.next_reset_date,
+            type: "usage_limit_reached",
+            message: "The usage limit has been reached",
           },
-        }),
-        { status: 429, headers: { "Content-Type": "application/json" } }
+        }
       );
+      return;
     }
   }
 
-  return proxyUpstream(req);
-}
-
-const server = Bun.serve({
-  port: config.port,
-  hostname: "0.0.0.0",
-  async fetch(req: Request): Promise<Response> {
-    const url = new URL(req.url);
-    const path = getRoutePath(url.pathname);
-    const method = req.method;
-
-    // Management API routes
-    if (path.startsWith("/api/")) {
-      // Public: login
-      if (path === "/api/auth/login" && method === "POST") {
-        return handleLogin(req);
-      }
-
-      // Protected: all other /api/ routes require JWT
-      const authErr = await requireAdmin(req);
-      if (authErr) return authErr;
-
-      // Budget CRUD
-      if (path === "/api/budgets" && method === "GET") {
-        return handleListBudgets();
-      }
-      if (path === "/api/budgets" && method === "POST") {
-        return handleCreateBudget(req);
-      }
-
-      // Single budget by hash
-      const budgetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)$/);
-      if (budgetMatch) {
-        const hash = budgetMatch[1];
-        if (method === "GET") return handleGetBudget(hash);
-        if (method === "DELETE") return handleDeleteBudget(hash);
-      }
-
-      // Update reset date
-      const resetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/reset-date$/);
-      if (resetMatch && method === "PUT") {
-        return handleUpdateResetDate(resetMatch[1], req);
-      }
-
-      // Toggle enabled
-      const toggleMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/enabled$/);
-      if (toggleMatch && method === "PUT") {
-        return handleToggleBudget(toggleMatch[1], req);
-      }
-
-      // List API keys
-      if (path === "/api/keys" && method === "GET") {
-        return handleListApiKeys();
-      }
-
-      return fail("Not found", 404);
-    }
-
-    // Health check
-    if (path === "/health") {
-      return ok({ status: "ok", upstream: config.upstreamUrl });
-    }
-
-    // Root "/" — forward directly, no budget check
-    if (path === "/" || path === "") {
-      return proxyUpstream(req);
-    }
-
-    // Everything else: forward with budget pre-check
-    return handleForward(req);
-  },
+  proxyUpstreamUpgrade(req, socket, head);
 });
 
-console.log(`[ccs-limit] listening on :${server.port}`);
-console.log(`[ccs-limit] upstream: ${config.upstreamUrl}`);
-console.log(`[ccs-limit] budget db: ${config.budgetDbPath}`);
-console.log(`[ccs-limit] usage db: ${config.usageDbPath}`);
+server.listen(config.port, "0.0.0.0", () => {
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : config.port;
+  console.log(`[ccs-limit] listening on :${port}`);
+  console.log(`[ccs-limit] upstream: ${config.upstreamUrl}`);
+  console.log(`[ccs-limit] budget db: ${config.budgetDbPath}`);
+  console.log(`[ccs-limit] usage db: ${config.usageDbPath}`);
+});

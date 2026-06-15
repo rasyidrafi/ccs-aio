@@ -10,9 +10,6 @@ interface ApiKeyEntry {
   name: string;
 }
 
-let cachedKeys: ApiKeyEntry[] | null = null;
-let cacheMtime = 0;
-
 export async function resolveApiKeys(): Promise<ApiKeyEntry[]> {
   const entries: ApiKeyEntry[] = [];
   const configFiles = new Set<string>();
