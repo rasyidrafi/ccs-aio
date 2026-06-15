@@ -146,3 +146,26 @@ export interface LimitsPayload {
   alerts: LimitsAlert[]
   accounts: LimitsAccountRow[]
 }
+
+export interface BudgetRow {
+  api_key_hash: string
+  weekly_limit_usd: number
+  week_start_date: string
+  next_reset_date: string
+  enabled: number
+  created_at: string
+  updated_at: string
+  apiKeyName: string | null
+  spentUsd: number
+  remainingUsd: number
+  percentUsed: number
+  isOverBudget: boolean
+  daysUntilReset: number
+}
+
+export interface ApiKeyEntry {
+  hash: string
+  name: string
+  hasBudget: boolean
+  budget: BudgetRow | null
+}

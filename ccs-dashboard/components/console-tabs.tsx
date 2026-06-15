@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { ChartColumnBig, ShieldAlert } from "lucide-react"
+import { ChartColumnBig, ShieldAlert, Wallet } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils"
 const ITEMS = [
   { href: "/", label: "Dashboard", icon: ChartColumnBig },
   { href: "/limits", label: "Limits", icon: ShieldAlert },
+  { href: "/budgets", label: "Budgets", icon: Wallet },
 ]
 
 export function ConsoleTabs({ className }: { className?: string }) {
