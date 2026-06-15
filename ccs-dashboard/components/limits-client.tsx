@@ -19,7 +19,7 @@ import {
   LimitsTable,
   SummaryCard,
 } from "@/components/limits/limits-sections"
-import { formatDateTime, formatNumber } from "@/components/limits/limits-utils"
+import { formatNumber } from "@/components/limits/limits-utils"
 import type { LimitsPayload } from "@/lib/types"
 
 export { LimitsPageSkeleton } from "@/components/limits/limits-loading"

@@ -61,5 +61,7 @@ export function getProgressColor(percentUsed: number): string {
 
 export const CCS_LIMIT_URL =
   typeof window !== "undefined"
-    ? `http://${window.location.hostname}:8098`
+    ? window.location.protocol === "https:"
+      ? "https://api.ccs.halotec.my.id"
+      : `http://${window.location.hostname}:8098`
     : "http://localhost:8098"

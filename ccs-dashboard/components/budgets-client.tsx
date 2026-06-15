@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   DollarSign,
   KeyRound,
-  Wallet,
 } from "lucide-react"
 
 import { ThemeProvider } from "@/components/theme-provider"
@@ -71,6 +70,7 @@ export function BudgetsClient() {
   }, [token, headers])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchData()
   }, [fetchData])
 
@@ -146,6 +146,19 @@ export function BudgetsClient() {
     }
   }
 
+  async function handleUpdateLimit(hash: string, limit: number) {
+    try {
+      await fetch(`${CCS_LIMIT_URL}/api/budgets/${hash}/limit`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ weeklyLimitUsd: limit }),
+      })
+      fetchData()
+    } catch {
+      // ignore
+    }
+  }
+
   async function handleCreate(
     hash: string,
     limit: number,
@@ -189,14 +202,18 @@ export function BudgetsClient() {
   if (!token) {
     return (
       <ThemeProvider>
-        <main className="min-h-screen bg-background">
-          <div className="mx-auto flex min-h-screen max-w-[1600px] flex-col gap-4 px-4 py-6 lg:px-6 lg:py-8">
+        <main className="flex min-h-screen flex-col bg-background">
+          <div className="mx-auto w-full max-w-[1600px] px-4 py-6 lg:px-6 lg:py-8">
             <BudgetsLoginHeader />
-            <LoginForm
-              onLogin={handleLogin}
-              error={loginError}
-              loading={loginLoading}
-            />
+          </div>
+          <div className="flex flex-1 items-center justify-center p-4">
+            <div className="w-full max-w-sm">
+              <LoginForm
+                onLogin={handleLogin}
+                error={loginError}
+                loading={loginLoading}
+              />
+            </div>
           </div>
         </main>
       </ThemeProvider>
@@ -292,6 +309,7 @@ export function BudgetsClient() {
               onToggle={handleToggle}
               onDelete={handleDelete}
               onUpdateResetDate={handleUpdateResetDate}
+              onUpdateLimit={handleUpdateLimit}
             />
           </section>
         </div>

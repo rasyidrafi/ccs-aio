@@ -1,6 +1,6 @@
 "use client"
 
-import { LogOut, RefreshCw, Wallet } from "lucide-react"
+import { LogOut, RefreshCw } from "lucide-react"
 
 import { ConsoleTabs } from "@/components/console-tabs"
 import { ThemeSelect } from "@/components/theme-select"
