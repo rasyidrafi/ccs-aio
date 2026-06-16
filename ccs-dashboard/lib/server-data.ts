@@ -25,9 +25,9 @@ export async function getCachedDashboardPayload(
 export async function getCachedLimitsPayload(): Promise<LimitsPayload> {
   "use cache"
   cacheLife({
-    stale: 60,
-    revalidate: 90,
-    expire: 180,
+    stale: 180,
+    revalidate: 180,
+    expire: 360,
   })
   cacheTag("limits")
 

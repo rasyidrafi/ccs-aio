@@ -55,6 +55,7 @@ export interface DashboardKeyRow {
   modelsUsed: string[]
   lastUsed: string | null
   sourceState: RowSourceState
+  budget: BudgetRow | null
 }
 
 export interface DashboardModelRow {

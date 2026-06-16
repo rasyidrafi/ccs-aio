@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite"
 import YAML from "yaml"
 
 import { shortUsageHash } from "@/lib/redaction"
+import { getPublicBudgetMap } from "@/lib/budget-service"
 import type {
   DashboardKeyRow,
   DashboardPayload,
@@ -579,8 +580,11 @@ function emptyPayload(
 export async function getDashboardPayload(
   query: DashboardQuery
 ): Promise<DashboardPayload> {
-  const managementUrl = await readManagementUrl()
-  const configuredApiKeyNames = await readConfiguredApiKeyNames()
+  const [managementUrl, configuredApiKeyNames, budgetMap] = await Promise.all([
+    readManagementUrl(),
+    readConfiguredApiKeyNames(),
+    getPublicBudgetMap(),
+  ])
   const dbPath = getDatabasePath()
 
   let db: DatabaseSync | null = null
@@ -726,6 +730,7 @@ export async function getDashboardPayload(
           : [],
         lastUsed: row.last_used,
         sourceState: row.live_requests > 0 ? "live" : "fallback",
+        budget: budgetMap.get(keyHash) ?? null,
       }
     })
 

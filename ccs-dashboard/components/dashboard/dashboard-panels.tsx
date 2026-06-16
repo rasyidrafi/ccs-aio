@@ -50,6 +50,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { Progress, ProgressLabel } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
 import type {
   DashboardKeyRow,
@@ -68,6 +69,15 @@ import {
   getOptionLabel,
   getStateBadgeVariant,
 } from "@/components/dashboard/dashboard-utils"
+import {
+  formatCurrency,
+  formatDate,
+  formatPercent,
+} from "@/components/budgets/budgets-utils"
+
+function formatBudgetResetIn(daysUntilReset: number): string {
+  return daysUntilReset === 0 ? "Today" : `${daysUntilReset}d`
+}
 
 function RefreshScrim({ label = "Refreshing data..." }: { label?: string }) {
   return (
@@ -492,7 +502,7 @@ export function UsageTable({
       </CardHeader>
       <CardContent className="min-h-0 flex-1">
         <ScrollArea className="h-full rounded-lg border border-border/70">
-          <Table className="min-w-[1140px]">
+          <Table className="min-w-[1580px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="sticky top-0 z-10 bg-card text-center">
@@ -513,6 +523,15 @@ export function UsageTable({
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 bg-card">
                   Models
+                </TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card min-w-[220px]">
+                  Weekly Usage
+                </TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card min-w-[180px]">
+                  Weekly Period
+                </TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">
+                  Reset In
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 bg-card">
                   Last used
@@ -546,6 +565,46 @@ export function UsageTable({
                   </TableCell>
                   <TableCell className="max-w-[240px] whitespace-normal text-muted-foreground">
                     {row.modelsUsed.join(", ") || "—"}
+                  </TableCell>
+                  <TableCell className="min-w-[220px]">
+                    {row.budget ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-xs font-medium text-muted-foreground">
+                            {formatCurrency(row.budget.spentUsd)} /{" "}
+                            {formatCurrency(row.budget.weekly_limit_usd)}
+                          </span>
+                          <span className="text-xs text-muted-foreground tabular-nums">
+                            {formatPercent(row.budget.percentUsed)}
+                          </span>
+                        </div>
+                        <Progress value={Math.min(row.budget.percentUsed, 100)}>
+                          <ProgressLabel className="sr-only">
+                            Weekly budget usage
+                          </ProgressLabel>
+                        </Progress>
+                        <div className="text-xs text-muted-foreground">
+                          {formatCurrency(row.budget.remainingUsd)} remaining
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="min-w-[180px] text-sm text-muted-foreground">
+                    {row.budget ? (
+                      <>
+                        {formatDate(row.budget.week_start_date)} &rarr;{" "}
+                        {formatDate(row.budget.next_reset_date)}
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground tabular-nums">
+                    {row.budget
+                      ? formatBudgetResetIn(row.budget.daysUntilReset)
+                      : "—"}
                   </TableCell>
                   <TableCell>{formatDateTime(row.lastUsed)}</TableCell>
                   <TableCell>

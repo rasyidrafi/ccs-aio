@@ -597,6 +597,11 @@ const handleHttpRequest: NodeHandler = async (req, res) => {
       return;
     }
 
+    if (path === "/api/public/budgets" && method === "GET") {
+      await writeNodeResponse(res, await handleListBudgets());
+      return;
+    }
+
     const authErr = await requireAdmin(webReq);
     if (authErr) {
       await writeNodeResponse(res, authErr);
