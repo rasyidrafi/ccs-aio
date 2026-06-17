@@ -62,6 +62,27 @@ function requiresBudgetPrecheck(pathname: string): boolean {
   return !shouldSkipBudgetPrecheck(pathname);
 }
 
+function isLocalApiRoute(pathname: string, method: string): boolean {
+  if (pathname === "/api/auth/login" && method === "POST") return true;
+  if (pathname === "/api/public/budgets" && method === "GET") return true;
+  if (pathname === "/api/budgets" && (method === "GET" || method === "POST")) return true;
+  if (pathname === "/api/keys" && method === "GET") return true;
+
+  const budgetMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)$/);
+  if (budgetMatch && (method === "GET" || method === "DELETE")) return true;
+
+  const resetMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)\/reset-date$/);
+  if (resetMatch && method === "PUT") return true;
+
+  const limitMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)\/limit$/);
+  if (limitMatch && method === "PUT") return true;
+
+  const toggleMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)\/enabled$/);
+  if (toggleMatch && method === "PUT") return true;
+
+  return false;
+}
+
 function createNodeRequest(req: http.IncomingMessage): Request {
   const origin = `http://${req.headers.host || "127.0.0.1"}`;
   const method = req.method || "GET";
@@ -583,13 +604,18 @@ const handleHttpRequest: NodeHandler = async (req, res) => {
   const path = getRoutePath(url);
   const method = req.method || "GET";
 
-  if (path.startsWith("/api/") && method === "OPTIONS") {
-    res.writeHead(204, CORS_HEADERS);
-    res.end();
-    return;
-  }
-
   if (path.startsWith("/api/")) {
+    if (method === "OPTIONS" && isLocalApiRoute(path, "OPTIONS")) {
+      res.writeHead(204, CORS_HEADERS);
+      res.end();
+      return;
+    }
+
+    if (!isLocalApiRoute(path, method)) {
+      await proxyUpstreamHttp(req, res);
+      return;
+    }
+
     const webReq = createNodeRequest(req);
 
     if (path === "/api/auth/login" && method === "POST") {
@@ -652,9 +678,6 @@ const handleHttpRequest: NodeHandler = async (req, res) => {
       await writeNodeResponse(res, await handleListApiKeys());
       return;
     }
-
-    await writeNodeResponse(res, fail("Not found", 404));
-    return;
   }
 
   if (path === "/health") {
@@ -694,6 +717,22 @@ const server = http.createServer((req, res) => {
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
   const path = getRoutePath(url);
+  const method = req.method || "GET";
+
+  if (path.startsWith("/api/")) {
+    if (!isLocalApiRoute(path, method)) {
+      proxyUpstreamUpgrade(req, socket, head);
+      return;
+    }
+
+    writeUpgradeFailure(
+      socket,
+      404,
+      "Not Found",
+      { error: { message: "Not found", type: "invalid_request_error" } }
+    );
+    return;
+  }
 
   if (requiresBudgetPrecheck(path)) {
     const authHeader =
