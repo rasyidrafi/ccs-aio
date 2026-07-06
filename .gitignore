@@ -2,3 +2,4 @@ ccs-dashboard-old/
 node_modules/
 ccs-old-data/
 ccs-limit-notifier/.env
+auth.json
