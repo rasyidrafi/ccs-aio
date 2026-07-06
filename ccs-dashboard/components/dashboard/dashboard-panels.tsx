@@ -79,6 +79,20 @@ function formatBudgetResetIn(daysUntilReset: number): string {
   return daysUntilReset === 0 ? "Today" : `${daysUntilReset}d`
 }
 
+function UnlimitedMark({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className={cn(
+        "unlimited-shine inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-semibold tabular-nums",
+        compact ? "text-[11px]" : "text-sm"
+      )}
+    >
+      <span className="font-mono">∞</span>
+      <span>Unlimited</span>
+    </span>
+  )
+}
+
 function RefreshScrim({ label = "Refreshing data..." }: { label?: string }) {
   return (
     <div className="pointer-events-none absolute inset-0 z-20 flex items-start justify-end rounded-[inherit] bg-background/40 p-3 backdrop-blur-[1.5px]">
@@ -524,10 +538,10 @@ export function UsageTable({
                 <TableHead className="sticky top-0 z-10 bg-card">
                   Models
                 </TableHead>
-                <TableHead className="sticky top-0 z-10 bg-card min-w-[220px]">
+                <TableHead className="sticky top-0 z-10 min-w-[220px] bg-card">
                   Weekly Usage
                 </TableHead>
-                <TableHead className="sticky top-0 z-10 bg-card min-w-[180px]">
+                <TableHead className="sticky top-0 z-10 min-w-[180px] bg-card">
                   Weekly Period
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 bg-card">
@@ -571,20 +585,42 @@ export function UsageTable({
                       <div className="space-y-2">
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-xs font-medium text-muted-foreground">
-                            {formatCurrency(row.budget.spentUsd)} /{" "}
-                            {formatCurrency(row.budget.weekly_limit_usd)}
+                            {row.budget.bypassLimitEnabled
+                              ? formatCurrency(row.budget.spentUsd)
+                              : `${formatCurrency(
+                                  row.budget.spentUsd
+                                )} / ${formatCurrency(
+                                  row.budget.weekly_limit_usd
+                                )}`}
                           </span>
-                          <span className="text-xs text-muted-foreground tabular-nums">
-                            {formatPercent(row.budget.percentUsed)}
-                          </span>
+                          {row.budget.bypassLimitEnabled ? (
+                            <UnlimitedMark compact />
+                          ) : (
+                            <span className="text-xs text-muted-foreground tabular-nums">
+                              {formatPercent(row.budget.percentUsed)}
+                            </span>
+                          )}
                         </div>
-                        <Progress value={Math.min(row.budget.percentUsed, 100)}>
+                        <Progress
+                          value={
+                            row.budget.bypassLimitEnabled
+                              ? 100
+                              : Math.min(row.budget.percentUsed, 100)
+                          }
+                          className={
+                            row.budget.bypassLimitEnabled
+                              ? "unlimited-progress"
+                              : undefined
+                          }
+                        >
                           <ProgressLabel className="sr-only">
                             Weekly budget usage
                           </ProgressLabel>
                         </Progress>
                         <div className="text-xs text-muted-foreground">
-                          {formatCurrency(row.budget.remainingUsd)} remaining
+                          {row.budget.bypassLimitEnabled
+                            ? "Unlimited Usage"
+                            : `${formatCurrency(row.budget.remainingUsd)} remaining`}
                         </div>
                       </div>
                     ) : (

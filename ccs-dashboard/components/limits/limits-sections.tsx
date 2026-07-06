@@ -4,7 +4,19 @@ import { Fragment } from "react"
 import { Activity, AlertTriangle, RefreshCw } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -155,6 +167,75 @@ function shouldMergeResetCell(account: LimitsAccountRow): boolean {
   )
 }
 
+function getRedeemDisabledReason(
+  account: LimitsAccountRow,
+  adminUnlocked: boolean
+): string | null {
+  if (!adminUnlocked) return "Unlock Admin Actions to redeem reset credits."
+  if (account.status !== "active") return "Only active accounts can redeem."
+  if (account.unusedResets === null) return "Unused reset count is unknown."
+  if (account.unusedResets < 1) return "No unused reset credits available."
+  if (!account.weekly) return "Weekly limit state is unavailable."
+  if (account.weekly.remainingPercent > 0) {
+    return "Weekly limit must be 0% remaining before redeeming."
+  }
+  return null
+}
+
+function RedeemAction({
+  account,
+  adminUnlocked,
+  redeeming,
+  onRedeem,
+}: {
+  account: LimitsAccountRow
+  adminUnlocked: boolean
+  redeeming: boolean
+  onRedeem: (accountId: string) => void
+}) {
+  const disabledReason = getRedeemDisabledReason(account, adminUnlocked)
+  const disabled = Boolean(disabledReason) || redeeming
+  const tooltip = redeeming
+    ? "Redeeming reset credit..."
+    : disabledReason ?? "Redeem one Codex reset credit for this account."
+
+  return (
+    <span
+      className="inline-flex"
+      title={tooltip}
+      tabIndex={disabled ? 0 : undefined}
+    >
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button
+            variant="outline"
+            size="xs"
+            disabled={disabled}
+            className="min-w-20"
+          >
+            {redeeming ? "Redeeming" : "Redeem"}
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Redeem reset credit?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will consume 1 Codex reset credit for {account.displayName}.
+              Continue only if this account&apos;s weekly limit is exhausted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => onRedeem(account.id)}>
+              Redeem
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </span>
+  )
+}
+
 function InlineNotePill({ children }: { children: string }) {
   return (
     <span className="inline-flex items-center rounded-md border border-border/60 bg-muted/80 px-1.5 py-0.5 font-mono text-[0.75em] leading-none text-foreground shadow-sm dark:border-border/50 dark:bg-muted/40">
@@ -193,9 +274,15 @@ export function AlertsPanel({
 export function LimitsTable({
   limits,
   refreshing,
+  adminUnlocked,
+  redeemingAccountId,
+  onRedeem,
 }: {
   limits: LimitsPayload
   refreshing: boolean
+  adminUnlocked: boolean
+  redeemingAccountId: string | null
+  onRedeem: (accountId: string) => void
 }) {
   return (
     <Card
@@ -211,7 +298,7 @@ export function LimitsTable({
       </CardHeader>
       <CardContent className="min-h-0 flex-1">
         <ScrollArea className="h-full rounded-lg border border-border/70">
-          <Table className="min-w-[1260px]">
+          <Table className="min-w-[1440px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="sticky top-0 z-10 bg-card text-center">
@@ -233,6 +320,12 @@ export function LimitsTable({
                 <TableHead className="sticky top-0 z-10 w-[88px] bg-card text-center">
                   Reset
                 </TableHead>
+                <TableHead className="sticky top-0 z-10 w-[96px] bg-card text-center">
+                  Unused Resets
+                </TableHead>
+                <TableHead className="sticky top-0 z-10 w-[96px] bg-card text-center">
+                  Action
+                </TableHead>
                 <TableHead className="sticky top-0 z-10 w-[88px] bg-card text-center">
                   Success
                 </TableHead>
@@ -248,7 +341,7 @@ export function LimitsTable({
               {limits.accounts.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={10}
+                    colSpan={12}
                     className="h-32 text-center text-sm text-muted-foreground"
                   >
                     No Codex accounts were discovered.
@@ -275,7 +368,9 @@ export function LimitsTable({
                         </TableCell>
                         <TableCell rowSpan={rowSpan} className="min-w-[220px]">
                           <div className="space-y-1">
-                            <div className="font-medium">{account.displayName}</div>
+                            <div className="font-medium">
+                              {account.displayName}
+                            </div>
                             <div className="text-xs text-muted-foreground">
                               {account.email || account.sourceLabel}
                             </div>
@@ -297,7 +392,9 @@ export function LimitsTable({
                           </div>
                         </TableCell>
                         <TableCell rowSpan={rowSpan}>
-                          <Badge variant={getStatusBadgeVariant(account.status)}>
+                          <Badge
+                            variant={getStatusBadgeVariant(account.status)}
+                          >
                             {getStatusLabel(account.status)}
                           </Badge>
                         </TableCell>
@@ -312,7 +409,9 @@ export function LimitsTable({
                         <TableCell>
                           <QuotaCell
                             label="5 hour"
-                            remaining={account.fiveHour?.remainingPercent ?? null}
+                            remaining={
+                              account.fiveHour?.remainingPercent ?? null
+                            }
                             used={account.fiveHour?.usedPercent ?? null}
                             resetAfterSeconds={
                               account.fiveHour?.resetAfterSeconds ?? null
@@ -349,10 +448,35 @@ export function LimitsTable({
                               : "Unknown"}
                           </TableCell>
                         )}
-                        <TableCell rowSpan={rowSpan} className="w-[88px] text-center tabular-nums">
+                        <TableCell
+                          rowSpan={rowSpan}
+                          className="w-[96px] text-center tabular-nums"
+                        >
+                          {account.unusedResets === null
+                            ? "Unknown"
+                            : formatNumber(account.unusedResets)}
+                        </TableCell>
+                        <TableCell
+                          rowSpan={rowSpan}
+                          className="w-[96px] text-center"
+                        >
+                          <RedeemAction
+                            account={account}
+                            adminUnlocked={adminUnlocked}
+                            redeeming={redeemingAccountId === account.id}
+                            onRedeem={onRedeem}
+                          />
+                        </TableCell>
+                        <TableCell
+                          rowSpan={rowSpan}
+                          className="w-[88px] text-center tabular-nums"
+                        >
                           {formatNumber(account.successCount)}
                         </TableCell>
-                        <TableCell rowSpan={rowSpan} className="w-[88px] text-center tabular-nums">
+                        <TableCell
+                          rowSpan={rowSpan}
+                          className="w-[88px] text-center tabular-nums"
+                        >
                           {formatNumber(account.failureCount)}
                         </TableCell>
                         <TableCell
@@ -363,11 +487,13 @@ export function LimitsTable({
                         </TableCell>
                       </TableRow>
                       {sparkPool ? (
-                        <TableRow className="align-top bg-muted/20">
+                        <TableRow className="bg-muted/20 align-top">
                           <TableCell>
                             <QuotaCell
                               label="Codex Spark (5h)"
-                              remaining={sparkPool.fiveHour?.remainingPercent ?? null}
+                              remaining={
+                                sparkPool.fiveHour?.remainingPercent ?? null
+                              }
                               used={sparkPool.fiveHour?.usedPercent ?? null}
                               resetAfterSeconds={
                                 sparkPool.fiveHour?.resetAfterSeconds ?? null
@@ -377,7 +503,9 @@ export function LimitsTable({
                           <TableCell>
                             <QuotaCell
                               label="Codex Spark (weekly)"
-                              remaining={sparkPool.weekly?.remainingPercent ?? null}
+                              remaining={
+                                sparkPool.weekly?.remainingPercent ?? null
+                              }
                               used={sparkPool.weekly?.usedPercent ?? null}
                               resetAfterSeconds={
                                 sparkPool.weekly?.resetAfterSeconds ?? null

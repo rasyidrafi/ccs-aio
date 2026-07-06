@@ -105,8 +105,8 @@ function LoadingLimitsTable() {
   return (
     <div className="rounded-lg border border-border/70">
       <div className="border-b border-border/70 px-4 py-3">
-        <div className="grid min-w-[1260px] grid-cols-[44px_minmax(220px,1.5fr)_88px_92px_minmax(180px,1fr)_minmax(180px,1fr)_88px_88px_88px_110px] gap-4">
-          {Array.from({ length: 10 }).map((_, index) => (
+        <div className="grid min-w-[1350px] grid-cols-[44px_minmax(220px,1.5fr)_88px_92px_minmax(180px,1fr)_minmax(180px,1fr)_88px_96px_88px_88px_110px] gap-4">
+          {Array.from({ length: 11 }).map((_, index) => (
             <Skeleton key={index} className="h-4 w-full max-w-full" />
           ))}
         </div>
@@ -115,7 +115,7 @@ function LoadingLimitsTable() {
         {Array.from({ length: 6 }).map((_, rowIndex) => (
           <div
             key={rowIndex}
-            className="grid min-w-[1260px] grid-cols-[44px_minmax(220px,1.5fr)_88px_92px_minmax(180px,1fr)_minmax(180px,1fr)_88px_88px_88px_110px] gap-4 border-b border-border/70 px-4 py-4 last:border-b-0"
+            className="grid min-w-[1350px] grid-cols-[44px_minmax(220px,1.5fr)_88px_92px_minmax(180px,1fr)_minmax(180px,1fr)_88px_96px_88px_88px_110px] gap-4 border-b border-border/70 px-4 py-4 last:border-b-0"
           >
             <Skeleton className="h-4 w-6 justify-self-center" />
             <div className="min-w-0 space-y-2">
@@ -141,6 +141,7 @@ function LoadingLimitsTable() {
               <Skeleton className="h-3 w-24" />
             </div>
             <Skeleton className="h-4 w-14 justify-self-end" />
+            <Skeleton className="h-4 w-10 justify-self-end" />
             <Skeleton className="h-4 w-10 justify-self-end" />
             <Skeleton className="h-4 w-10 justify-self-end" />
             <Skeleton className="h-4 w-20" />

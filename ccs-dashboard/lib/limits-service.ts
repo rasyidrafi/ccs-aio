@@ -88,6 +88,13 @@ type CodexUsageWindow = {
 type CodexUsageResponse = {
   plan_type?: string
   planType?: string
+  rate_limit_reset_credits?: {
+    available_count?: number | string | null
+  } | null
+  rateLimitResetCredits?: {
+    available_count?: number | string | null
+    availableCount?: number | string | null
+  } | null
   rate_limit?: {
     primary_window?: CodexUsageWindow
     primaryWindow?: CodexUsageWindow
@@ -358,16 +365,29 @@ function prettifyFeatureLabel(value: string): string {
     return "Codex Spark"
   }
 
-  return normalized
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
+  return normalized.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim()
+}
+
+function resolveUnusedResetCredits(payload: CodexUsageResponse): number {
+  const raw =
+    payload.rate_limit_reset_credits?.available_count ??
+    payload.rateLimitResetCredits?.available_count ??
+    payload.rateLimitResetCredits?.availableCount
+
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return Math.max(0, Math.floor(raw))
+  }
+  if (typeof raw === "string" && /^\d+$/.test(raw)) {
+    return Number(raw)
+  }
+  return 0
 }
 
 async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
   planType: string | null
   fiveHour: LimitsQuotaWindow | null
   weekly: LimitsQuotaWindow | null
+  unusedResets: number
   additionalPools: LimitsAdditionalPool[]
 }> {
   if (!auth.access_token || !auth.account_id) {
@@ -409,6 +429,7 @@ async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
         "Weekly",
         rateLimit?.secondary_window || rateLimit?.secondaryWindow
       ),
+      unusedResets: resolveUnusedResetCredits(payload),
       additionalPools: Array.isArray(additionalRateLimits)
         ? additionalRateLimits.map((entry) => {
             const featureLabel =
@@ -532,6 +553,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: null,
           weekly: null,
+          unusedResets: null,
           additionalPools: [],
           alert: null,
           error: "Failed to read auth file",
@@ -551,6 +573,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: null,
           weekly: null,
+          unusedResets: null,
           additionalPools: [],
           alert: null,
           error: "Token expired. Re-authenticate this Codex account.",
@@ -575,6 +598,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: quota.fiveHour,
           weekly: quota.weekly,
+          unusedResets: quota.unusedResets,
           additionalPools: quota.additionalPools,
           error: null,
         }
@@ -601,6 +625,7 @@ export async function getLimitsPayload(
           updatedAt: entry.updated_at ?? null,
           fiveHour: null,
           weekly: null,
+          unusedResets: null,
           additionalPools: [],
           alert: null,
           error:

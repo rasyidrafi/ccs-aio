@@ -1,15 +1,13 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import {
-  Activity,
-  AlertTriangle,
-  DollarSign,
-  KeyRound,
-} from "lucide-react"
+import { Activity, AlertTriangle, DollarSign, KeyRound } from "lucide-react"
 
 import { ThemeProvider } from "@/components/theme-provider"
-import { BudgetsOverview, BudgetsLoginHeader } from "@/components/budgets/budgets-overview"
+import {
+  BudgetsOverview,
+  BudgetsLoginHeader,
+} from "@/components/budgets/budgets-overview"
 import {
   BudgetsTable,
   CreateBudgetForm,
@@ -21,17 +19,93 @@ import {
   formatCurrency,
   formatNumber,
 } from "@/components/budgets/budgets-utils"
-import type { ApiKeyEntry, BudgetRow } from "@/lib/types"
+import type { ApiKeyEntry, BudgetRow, BudgetWindow } from "@/lib/types"
 
 export { BudgetsPageSkeleton } from "@/components/budgets/budgets-loading"
 
+const BUDGET_AUTH_STORAGE_KEY = "ccs-dashboard:budgets-auth"
+const FALLBACK_SESSION_TTL_MS = 24 * 60 * 60 * 1000
+
+type StoredBudgetAuth = {
+  token: string
+  expiresAt: number
+}
+
+type ApiResponse<T> = {
+  ok: boolean
+  data?: T
+  error?: string
+}
+
+function loadStoredBudgetAuth(): StoredBudgetAuth | null {
+  if (typeof window === "undefined") return null
+
+  try {
+    const raw = window.localStorage.getItem(BUDGET_AUTH_STORAGE_KEY)
+    if (!raw) return null
+
+    const stored = JSON.parse(raw) as Partial<StoredBudgetAuth>
+    if (
+      typeof stored.token !== "string" ||
+      !stored.token ||
+      typeof stored.expiresAt !== "number" ||
+      stored.expiresAt <= Date.now()
+    ) {
+      window.localStorage.removeItem(BUDGET_AUTH_STORAGE_KEY)
+      return null
+    }
+
+    return {
+      token: stored.token,
+      expiresAt: stored.expiresAt,
+    }
+  } catch {
+    window.localStorage.removeItem(BUDGET_AUTH_STORAGE_KEY)
+    return null
+  }
+}
+
+function storeBudgetAuth(token: string, expiresInSeconds?: number) {
+  if (typeof window === "undefined") return
+
+  const ttlMs =
+    typeof expiresInSeconds === "number" && expiresInSeconds > 0
+      ? expiresInSeconds * 1000
+      : FALLBACK_SESSION_TTL_MS
+
+  window.localStorage.setItem(
+    BUDGET_AUTH_STORAGE_KEY,
+    JSON.stringify({
+      token,
+      expiresAt: Date.now() + ttlMs,
+    } satisfies StoredBudgetAuth)
+  )
+}
+
+function clearBudgetAuth() {
+  if (typeof window === "undefined") return
+  window.localStorage.removeItem(BUDGET_AUTH_STORAGE_KEY)
+}
+
+function getApiError(data: unknown, fallback: string): string {
+  if (data && typeof data === "object" && "error" in data) {
+    const error = (data as { error?: unknown }).error
+    if (typeof error === "string" && error.trim()) return error
+  }
+
+  return fallback
+}
+
 export function BudgetsClient() {
-  const [token, setToken] = useState<string | null>(null)
+  const [token, setToken] = useState<string | null>(
+    () => loadStoredBudgetAuth()?.token ?? null
+  )
   const [loginError, setLoginError] = useState<string | null>(null)
   const [loginLoading, setLoginLoading] = useState(false)
 
   const [budgets, setBudgets] = useState<BudgetRow[]>([])
   const [apiKeys, setApiKeys] = useState<ApiKeyEntry[]>([])
+  const [budgetWindow, setBudgetWindow] = useState<BudgetWindow | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -43,23 +117,58 @@ export function BudgetsClient() {
     [token]
   )
 
+  const clearSession = useCallback(() => {
+    clearBudgetAuth()
+    setToken(null)
+    setBudgets([])
+    setApiKeys([])
+    setBudgetWindow(null)
+  }, [])
+
+  const requestJson = useCallback(
+    async <T,>(url: string, init?: RequestInit): Promise<ApiResponse<T>> => {
+      const response = await fetch(url, {
+        ...init,
+        headers: {
+          ...headers,
+          ...init?.headers,
+        },
+      })
+      const data = (await response.json().catch(() => null)) as unknown
+
+      if (response.status === 401) {
+        clearSession()
+        throw new Error("Session expired. Sign in again.")
+      }
+      if (!response.ok) {
+        throw new Error(
+          getApiError(data, `Request failed with HTTP ${response.status}`)
+        )
+      }
+
+      const apiData = data as ApiResponse<T>
+      if (!apiData?.ok) {
+        throw new Error(getApiError(apiData, "Request failed"))
+      }
+
+      return apiData
+    },
+    [clearSession, headers]
+  )
+
   const fetchData = useCallback(async () => {
     if (!token) return
     setLoading(true)
     setError(null)
     try {
-      const [budgetsRes, keysRes] = await Promise.all([
-        fetch(`${CCS_LIMIT_URL}/api/budgets`, { headers }),
-        fetch(`${CCS_LIMIT_URL}/api/keys`, { headers }),
+      const [budgetsData, keysData, windowData] = await Promise.all([
+        requestJson<BudgetRow[]>(`${CCS_LIMIT_URL}/api/budgets`),
+        requestJson<ApiKeyEntry[]>(`${CCS_LIMIT_URL}/api/keys`),
+        requestJson<BudgetWindow>(`${CCS_LIMIT_URL}/api/budgets/window`),
       ])
-      if (budgetsRes.status === 401 || keysRes.status === 401) {
-        setToken(null)
-        return
-      }
-      const budgetsData = await budgetsRes.json()
-      const keysData = await keysRes.json()
-      if (budgetsData.ok) setBudgets(budgetsData.data)
-      if (keysData.ok) setApiKeys(keysData.data)
+      setBudgets(budgetsData.data ?? [])
+      setApiKeys(keysData.data ?? [])
+      setBudgetWindow(windowData.data ?? null)
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to fetch budget data"
@@ -67,7 +176,7 @@ export function BudgetsClient() {
     } finally {
       setLoading(false)
     }
-  }, [token, headers])
+  }, [token, requestJson])
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -86,22 +195,19 @@ export function BudgetsClient() {
       const data = await resp.json()
       if (data.ok) {
         setToken(data.data.token)
+        storeBudgetAuth(data.data.token, data.data.expiresIn)
       } else {
         setLoginError(data.error ?? "Login failed")
       }
     } catch (err) {
-      setLoginError(
-        err instanceof Error ? err.message : "Connection failed"
-      )
+      setLoginError(err instanceof Error ? err.message : "Connection failed")
     } finally {
       setLoginLoading(false)
     }
   }
 
   function handleLogout() {
-    setToken(null)
-    setBudgets([])
-    setApiKeys([])
+    clearSession()
   }
 
   function handleRefresh() {
@@ -109,76 +215,89 @@ export function BudgetsClient() {
   }
 
   async function handleToggle(hash: string, enabled: boolean) {
+    setError(null)
     try {
-      await fetch(`${CCS_LIMIT_URL}/api/budgets/${hash}/enabled`, {
+      await requestJson(`${CCS_LIMIT_URL}/api/budgets/${hash}/enabled`, {
         method: "PUT",
-        headers,
         body: JSON.stringify({ enabled }),
       })
       fetchData()
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update budget")
     }
   }
 
   async function handleDelete(hash: string) {
+    setError(null)
     try {
-      await fetch(`${CCS_LIMIT_URL}/api/budgets/${hash}`, {
+      await requestJson(`${CCS_LIMIT_URL}/api/budgets/${hash}`, {
         method: "DELETE",
-        headers,
       })
       fetchData()
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete budget")
     }
   }
 
-  async function handleUpdateResetDate(hash: string, date: string) {
+  async function handleUpdateDateRange(
+    weekStartDate: string,
+    nextResetDate: string
+  ) {
+    setError(null)
     try {
-      await fetch(`${CCS_LIMIT_URL}/api/budgets/${hash}/reset-date`, {
+      await requestJson(`${CCS_LIMIT_URL}/api/budgets/window`, {
         method: "PUT",
-        headers,
-        body: JSON.stringify({ nextResetDate: date }),
+        body: JSON.stringify({ weekStartDate, nextResetDate }),
       })
       fetchData()
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to update budget window"
+      )
+    }
+  }
+
+  async function handleToggleBypass(enabled: boolean) {
+    setError(null)
+    try {
+      await requestJson(`${CCS_LIMIT_URL}/api/budgets/bypass`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      })
+      fetchData()
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to update bypass mode"
+      )
     }
   }
 
   async function handleUpdateLimit(hash: string, limit: number) {
+    setError(null)
     try {
-      await fetch(`${CCS_LIMIT_URL}/api/budgets/${hash}/limit`, {
+      await requestJson(`${CCS_LIMIT_URL}/api/budgets/${hash}/limit`, {
         method: "PUT",
-        headers,
         body: JSON.stringify({ weeklyLimitUsd: limit }),
       })
       fetchData()
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update limit")
     }
   }
 
-  async function handleCreate(
-    hash: string,
-    limit: number,
-    resetDate: string
-  ) {
-    const today = new Date().toISOString().slice(0, 10)
+  async function handleCreate(hash: string, limit: number) {
+    setError(null)
     try {
-      await fetch(`${CCS_LIMIT_URL}/api/budgets`, {
+      await requestJson(`${CCS_LIMIT_URL}/api/budgets`, {
         method: "POST",
-        headers,
         body: JSON.stringify({
           apiKeyHash: hash,
           weeklyLimitUsd: limit,
-          weekStartDate: today,
-          nextResetDate: resetDate,
         }),
       })
       fetchData()
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create budget")
     }
   }
 
@@ -191,12 +310,19 @@ export function BudgetsClient() {
     [budgets]
   )
   const overBudgetCount = useMemo(
-    () => budgets.filter((b) => b.isOverBudget).length,
-    [budgets]
+    () =>
+      budgetWindow?.bypass_limit_enabled
+        ? 0
+        : budgets.filter((b) => b.isOverBudget).length,
+    [budgets, budgetWindow]
   )
   const activeCount = useMemo(
-    () => budgets.filter((b) => b.enabled && !b.isOverBudget).length,
-    [budgets]
+    () =>
+      budgets.filter(
+        (b) =>
+          b.enabled && (budgetWindow?.bypass_limit_enabled || !b.isOverBudget)
+      ).length,
+    [budgets, budgetWindow]
   )
 
   if (!token) {
@@ -305,10 +431,12 @@ export function BudgetsClient() {
             </div>
             <BudgetsTable
               budgets={budgets}
+              budgetWindow={budgetWindow}
               refreshing={loading}
               onToggle={handleToggle}
+              onToggleBypass={handleToggleBypass}
               onDelete={handleDelete}
-              onUpdateResetDate={handleUpdateResetDate}
+              onUpdateBudgetWindow={handleUpdateDateRange}
               onUpdateLimit={handleUpdateLimit}
             />
           </section>

@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useTransition } from "react"
+import { useCallback, useMemo, useState, useTransition } from "react"
 import { useRouter } from "next/navigation"
 import {
   Activity,
@@ -20,13 +20,96 @@ import {
   SummaryCard,
 } from "@/components/limits/limits-sections"
 import { formatNumber } from "@/components/limits/limits-utils"
+import { CCS_LIMIT_URL } from "@/components/budgets/budgets-utils"
 import type { LimitsPayload } from "@/lib/types"
 
 export { LimitsPageSkeleton } from "@/components/limits/limits-loading"
 
+const LIMITS_AUTH_STORAGE_KEY = "ccs-dashboard:budgets-auth"
+const FALLBACK_SESSION_TTL_MS = 24 * 60 * 60 * 1000
+
+type StoredLimitsAuth = {
+  token: string
+  expiresAt: number
+}
+
+type ApiResponse<T> = {
+  ok: boolean
+  data?: T
+  error?: string
+}
+
+function loadStoredLimitsAuth(): StoredLimitsAuth | null {
+  if (typeof window === "undefined") return null
+
+  try {
+    const raw = window.localStorage.getItem(LIMITS_AUTH_STORAGE_KEY)
+    if (!raw) return null
+
+    const stored = JSON.parse(raw) as Partial<StoredLimitsAuth>
+    if (
+      typeof stored.token !== "string" ||
+      !stored.token ||
+      typeof stored.expiresAt !== "number" ||
+      stored.expiresAt <= Date.now()
+    ) {
+      window.localStorage.removeItem(LIMITS_AUTH_STORAGE_KEY)
+      return null
+    }
+
+    return {
+      token: stored.token,
+      expiresAt: stored.expiresAt,
+    }
+  } catch {
+    window.localStorage.removeItem(LIMITS_AUTH_STORAGE_KEY)
+    return null
+  }
+}
+
+function storeLimitsAuth(token: string, expiresInSeconds?: number) {
+  if (typeof window === "undefined") return
+
+  const ttlMs =
+    typeof expiresInSeconds === "number" && expiresInSeconds > 0
+      ? expiresInSeconds * 1000
+      : FALLBACK_SESSION_TTL_MS
+
+  window.localStorage.setItem(
+    LIMITS_AUTH_STORAGE_KEY,
+    JSON.stringify({
+      token,
+      expiresAt: Date.now() + ttlMs,
+    } satisfies StoredLimitsAuth)
+  )
+}
+
+function clearLimitsAuth() {
+  if (typeof window === "undefined") return
+  window.localStorage.removeItem(LIMITS_AUTH_STORAGE_KEY)
+}
+
+function getApiError(data: unknown, fallback: string): string {
+  if (data && typeof data === "object" && "error" in data) {
+    const error = (data as { error?: unknown }).error
+    if (typeof error === "string" && error.trim()) return error
+  }
+
+  return fallback
+}
+
 export function LimitsClient({ limits }: { limits: LimitsPayload }) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
+  const [adminToken, setAdminToken] = useState<string | null>(
+    () => loadStoredLimitsAuth()?.token ?? null
+  )
+  const [loginError, setLoginError] = useState<string | null>(null)
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [redeemingAccountId, setRedeemingAccountId] = useState<string | null>(
+    null
+  )
   const isRefreshing = isPending
 
   const healthyCount = useMemo(
@@ -57,6 +140,86 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
     })
   }
 
+  const clearSession = useCallback(() => {
+    clearLimitsAuth()
+    setAdminToken(null)
+  }, [])
+
+  async function handleLogin(username: string, password: string) {
+    setLoginLoading(true)
+    setLoginError(null)
+    try {
+      const resp = await fetch(`${CCS_LIMIT_URL}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      })
+      const data = (await resp.json().catch(() => null)) as unknown
+      if (!resp.ok) {
+        setLoginError(getApiError(data, `Login failed with HTTP ${resp.status}`))
+        return
+      }
+
+      const apiData = data as ApiResponse<{ token: string; expiresIn?: number }>
+      if (apiData.ok && apiData.data?.token) {
+        setAdminToken(apiData.data.token)
+        storeLimitsAuth(apiData.data.token, apiData.data.expiresIn)
+      } else {
+        setLoginError(getApiError(apiData, "Login failed"))
+      }
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : "Connection failed")
+    } finally {
+      setLoginLoading(false)
+    }
+  }
+
+  function handleLogout() {
+    clearSession()
+  }
+
+  async function handleRedeem(accountId: string) {
+    if (!adminToken) return
+    setActionError(null)
+    setRedeemingAccountId(accountId)
+    try {
+      const response = await fetch(
+        `${CCS_LIMIT_URL}/api/codex-resets/${encodeURIComponent(
+          accountId
+        )}/redeem`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+        }
+      )
+      const data = (await response.json().catch(() => null)) as unknown
+
+      if (response.status === 401) {
+        clearSession()
+        throw new Error("Session expired. Unlock admin mode again.")
+      }
+      if (!response.ok) {
+        throw new Error(
+          getApiError(data, `Redeem failed with HTTP ${response.status}`)
+        )
+      }
+
+      const apiData = data as ApiResponse<unknown>
+      if (!apiData.ok) {
+        throw new Error(getApiError(apiData, "Redeem failed"))
+      }
+
+      handleRefresh()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Redeem failed")
+    } finally {
+      setRedeemingAccountId(null)
+    }
+  }
+
   return (
     <ThemeProvider>
       <main className="min-h-screen bg-background">
@@ -65,7 +228,18 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
             limits={limits}
             loading={isPending}
             onRefresh={handleRefresh}
+            adminUnlocked={Boolean(adminToken)}
+            loginError={loginError}
+            loginLoading={loginLoading}
+            onAdminLogin={handleLogin}
+            onAdminLogout={handleLogout}
           />
+
+          {actionError ? (
+            <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+              {actionError}
+            </div>
+          ) : null}
 
           <section className="space-y-4">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -175,7 +349,13 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
                 Quota runway across every discovered Codex account.
               </p>
             </div>
-            <LimitsTable limits={limits} refreshing={isRefreshing} />
+            <LimitsTable
+              limits={limits}
+              refreshing={isRefreshing}
+              adminUnlocked={Boolean(adminToken)}
+              redeemingAccountId={redeemingAccountId}
+              onRedeem={handleRedeem}
+            />
           </section>
         </div>
       </main>

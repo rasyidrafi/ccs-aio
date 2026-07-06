@@ -1,14 +1,16 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { format } from "date-fns"
 import {
   AlertTriangle,
-  CalendarIcon,
+  CalendarDays,
   DollarSign,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react"
+import type { DateRange } from "react-day-picker"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
@@ -33,11 +35,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import {
-  Field,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field"
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import {
   Popover,
@@ -63,7 +61,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import type { ApiKeyEntry, BudgetRow } from "@/lib/types"
+import type { ApiKeyEntry, BudgetRow, BudgetWindow } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
   TABLE_PANEL_HEIGHT,
@@ -73,6 +71,51 @@ import {
   getStatusBadgeVariant,
   getStatusLabel,
 } from "@/components/budgets/budgets-utils"
+
+type BudgetSortKey = "limit" | "usage" | "name"
+
+const BUDGET_SORT_OPTIONS = [
+  { value: "limit", label: "Highest limit first" },
+  { value: "usage", label: "Highest usage first" },
+  { value: "name", label: "API key name" },
+] as const
+
+function getSortLabel(value: BudgetSortKey): string {
+  return (
+    BUDGET_SORT_OPTIONS.find((option) => option.value === value)?.label ??
+    BUDGET_SORT_OPTIONS[0].label
+  )
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date)
+  next.setDate(next.getDate() + days)
+  return next
+}
+
+function startOfToday(): Date {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return today
+}
+
+function formatBudgetResetIn(daysUntilReset: number): string {
+  return daysUntilReset === 0 ? "Today" : `${daysUntilReset}d`
+}
+
+function UnlimitedMark({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className={cn(
+        "unlimited-shine inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-semibold tabular-nums",
+        compact ? "text-[11px]" : "text-sm"
+      )}
+    >
+      <span className="font-mono">∞</span>
+      <span>{compact ? "Unlimited" : "Unlimited"}</span>
+    </span>
+  )
+}
 
 function RefreshScrim({ label = "Refreshing data..." }: { label?: string }) {
   return (
@@ -175,7 +218,9 @@ export function LoginForm({
               {error ? (
                 <Alert variant="destructive" className="border-border/70 p-3">
                   <AlertTriangle className="size-4" />
-                  <AlertDescription className="ml-2 font-medium">{error}</AlertDescription>
+                  <AlertDescription className="ml-2 font-medium">
+                    {error}
+                  </AlertDescription>
                 </Alert>
               ) : null}
               <Field>
@@ -196,17 +241,22 @@ function BudgetRowItem({
   index,
   onToggle,
   onDelete,
-  onUpdateResetDate,
   onUpdateLimit,
+  bypassLimitEnabled,
 }: {
   budget: BudgetRow
   index: number
   onToggle: (hash: string, enabled: boolean) => void
   onDelete: (hash: string) => void
-  onUpdateResetDate: (hash: string, date: string) => void
   onUpdateLimit: (hash: string, limit: number) => void
+  bypassLimitEnabled: boolean
 }) {
-  const [isPopoverOpen, setIsPopoverOpen] = useState(false)
+  const [isLimitOpen, setIsLimitOpen] = useState(false)
+  const [limitValue, setLimitValue] = useState(String(budget.weekly_limit_usd))
+
+  useEffect(() => {
+    setLimitValue(String(budget.weekly_limit_usd))
+  }, [budget.weekly_limit_usd])
 
   return (
     <TableRow className="align-top">
@@ -215,9 +265,7 @@ function BudgetRowItem({
       </TableCell>
       <TableCell className="min-w-[160px]">
         <div className="space-y-1">
-          <div className="font-medium">
-            {budget.apiKeyName ?? "Unknown"}
-          </div>
+          <div className="font-medium">{budget.apiKeyName ?? "Unknown"}</div>
           <div className="font-mono text-xs text-muted-foreground">
             {budget.api_key_hash}
           </div>
@@ -229,37 +277,44 @@ function BudgetRowItem({
         </Badge>
       </TableCell>
       <TableCell className="text-right tabular-nums">
-        {formatCurrency(budget.weekly_limit_usd)}
+        {bypassLimitEnabled ? (
+          <div className="flex justify-end">
+            <UnlimitedMark />
+          </div>
+        ) : (
+          formatCurrency(budget.weekly_limit_usd)
+        )}
       </TableCell>
       <TableCell className="min-w-[200px]">
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-3">
             <span className="text-xs font-medium text-muted-foreground">
-              {formatCurrency(budget.spentUsd)} /{" "}
-              {formatCurrency(budget.weekly_limit_usd)}
+              {bypassLimitEnabled
+                ? formatCurrency(budget.spentUsd)
+                : `${formatCurrency(budget.spentUsd)} / ${formatCurrency(
+                    budget.weekly_limit_usd
+                  )}`}
             </span>
-            <span className="text-xs text-muted-foreground tabular-nums">
-              {formatPercent(budget.percentUsed)}
-            </span>
+            {bypassLimitEnabled ? (
+              <UnlimitedMark compact />
+            ) : (
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {formatPercent(budget.percentUsed)}
+              </span>
+            )}
           </div>
-          <Progress value={Math.min(budget.percentUsed, 100)}>
+          <Progress
+            value={bypassLimitEnabled ? 100 : Math.min(budget.percentUsed, 100)}
+            className={bypassLimitEnabled ? "unlimited-progress" : undefined}
+          >
             <ProgressLabel className="sr-only">Budget usage</ProgressLabel>
           </Progress>
           <div className="text-xs text-muted-foreground">
-            {formatCurrency(budget.remainingUsd)} remaining
+            {bypassLimitEnabled
+              ? "Unlimited Usage"
+              : `${formatCurrency(budget.remainingUsd)} remaining`}
           </div>
         </div>
-      </TableCell>
-      <TableCell className="min-w-[180px]">
-        <div className="space-y-1 text-sm text-muted-foreground">
-          <div>
-            {formatDate(budget.week_start_date)} &rarr;{" "}
-            {formatDate(budget.next_reset_date)}
-          </div>
-        </div>
-      </TableCell>
-      <TableCell className="w-[88px] text-center text-sm text-muted-foreground tabular-nums">
-        {budget.daysUntilReset === 0 ? "Today" : `${budget.daysUntilReset}d`}
       </TableCell>
       <TableCell className="w-[200px]">
         <div className="flex flex-wrap gap-1">
@@ -270,26 +325,34 @@ function BudgetRowItem({
           >
             {budget.enabled ? "Disable" : "Enable"}
           </Button>
-          <Popover>
-            <PopoverTrigger render={<Button variant="outline" size="xs">Limit</Button>} />
+          <Popover open={isLimitOpen} onOpenChange={setIsLimitOpen}>
+            <PopoverTrigger
+              render={
+                <Button variant="outline" size="xs">
+                  Limit
+                </Button>
+              }
+            />
             <PopoverContent className="w-auto p-3" align="end">
               <div className="flex flex-col gap-2">
                 <label className="text-sm font-medium">Edit Limit ($)</label>
                 <div className="flex items-center gap-2">
-                  <Input 
-                    type="number" 
-                    defaultValue={budget.weekly_limit_usd}
-                    id={`limit-${budget.api_key_hash}`}
+                  <Input
+                    type="number"
+                    value={limitValue}
+                    onChange={(event) => setLimitValue(event.target.value)}
                     min="0.01"
                     step="0.01"
-                    className="w-24 h-8"
+                    className="h-8 w-24"
                   />
-                  <Button 
+                  <Button
                     size="sm"
+                    disabled={Number(limitValue) <= 0}
                     onClick={() => {
-                      const val = parseFloat((document.getElementById(`limit-${budget.api_key_hash}`) as HTMLInputElement).value)
-                      if (!isNaN(val) && val > 0) {
+                      const val = Number(limitValue)
+                      if (Number.isFinite(val) && val > 0) {
                         onUpdateLimit(budget.api_key_hash, val)
+                        setIsLimitOpen(false)
                       }
                     }}
                   >
@@ -297,22 +360,6 @@ function BudgetRowItem({
                   </Button>
                 </div>
               </div>
-            </PopoverContent>
-          </Popover>
-          <Popover open={isPopoverOpen} onOpenChange={setIsPopoverOpen}>
-            <PopoverTrigger render={<Button variant="outline" size="xs">Move reset</Button>} />
-            <PopoverContent className="w-auto p-0" align="end">
-              <Calendar
-                mode="single"
-                selected={new Date(budget.next_reset_date)}
-                onSelect={(date) => {
-                  if (date) {
-                    onUpdateResetDate(budget.api_key_hash, format(date, "yyyy-MM-dd"))
-                    setIsPopoverOpen(false)
-                  }
-                }}
-                initialFocus
-              />
             </PopoverContent>
           </Popover>
           <AlertDialog>
@@ -325,12 +372,16 @@ function BudgetRowItem({
               <AlertDialogHeader>
                 <AlertDialogTitle>Delete Budget</AlertDialogTitle>
                 <AlertDialogDescription>
-                  Are you sure you want to delete the budget for {budget.apiKeyName ?? budget.api_key_hash}? This action cannot be undone.
+                  Are you sure you want to delete the budget for{" "}
+                  {budget.apiKeyName ?? budget.api_key_hash}? This action cannot
+                  be undone.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={() => onDelete(budget.api_key_hash)}>
+                <AlertDialogAction
+                  onClick={() => onDelete(budget.api_key_hash)}
+                >
                   Delete
                 </AlertDialogAction>
               </AlertDialogFooter>
@@ -342,32 +393,199 @@ function BudgetRowItem({
   )
 }
 
+function SharedBudgetWindowControl({
+  budgetWindow,
+  refreshing,
+  onUpdateBudgetWindow,
+}: {
+  budgetWindow: BudgetWindow | null
+  refreshing: boolean
+  onUpdateBudgetWindow: (weekStartDate: string, nextResetDate: string) => void
+}) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [selectedRange, setSelectedRange] = useState<DateRange | undefined>()
+
+  useEffect(() => {
+    if (!budgetWindow) return
+    setSelectedRange({
+      from: new Date(budgetWindow.week_start_date),
+      to: new Date(budgetWindow.next_reset_date),
+    })
+  }, [budgetWindow])
+
+  const today = startOfToday()
+  const maxResetDate = selectedRange?.from
+    ? addDays(selectedRange.from, 7)
+    : undefined
+  const rangeLabel = budgetWindow
+    ? `${formatDate(budgetWindow.week_start_date)} - ${formatDate(
+        budgetWindow.next_reset_date
+      )}`
+    : "Loading"
+  const resetLabel = budgetWindow
+    ? formatBudgetResetIn(budgetWindow.daysUntilReset)
+    : "Loading"
+
+  return (
+    <div className="flex w-full flex-col gap-2 sm:w-auto">
+      <span className="text-sm font-medium">Budget window</span>
+      <Popover open={isOpen} onOpenChange={setIsOpen}>
+        <PopoverTrigger
+          render={
+            <Button
+              variant="outline"
+              className="h-8 min-w-56 justify-between gap-2 border-border/70 bg-background sm:h-9"
+              disabled={refreshing || !budgetWindow}
+            >
+              <span className="truncate text-left">{rangeLabel}</span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {resetLabel}
+              </span>
+              <CalendarDays className="size-4 shrink-0" />
+            </Button>
+          }
+        />
+        <PopoverContent className="w-auto p-3" align="end">
+          <div className="flex flex-col gap-3">
+            <Calendar
+              mode="range"
+              selected={selectedRange}
+              defaultMonth={selectedRange?.from}
+              onSelect={setSelectedRange}
+              disabled={
+                maxResetDate
+                  ? { before: today, after: maxResetDate }
+                  : { before: today }
+              }
+              numberOfMonths={1}
+              initialFocus
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (budgetWindow) {
+                    setSelectedRange({
+                      from: new Date(budgetWindow.week_start_date),
+                      to: new Date(budgetWindow.next_reset_date),
+                    })
+                  }
+                  setIsOpen(false)
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                disabled={!selectedRange?.from || !selectedRange?.to}
+                onClick={() => {
+                  if (!selectedRange?.from || !selectedRange?.to) return
+                  onUpdateBudgetWindow(
+                    format(selectedRange.from, "yyyy-MM-dd"),
+                    format(selectedRange.to, "yyyy-MM-dd")
+                  )
+                  setIsOpen(false)
+                }}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </div>
+  )
+}
+
+function BypassLimitControl({
+  enabled,
+  refreshing,
+  onToggleBypass,
+}: {
+  enabled: boolean
+  refreshing: boolean
+  onToggleBypass: (enabled: boolean) => void
+}) {
+  return (
+    <div className="flex w-full flex-col gap-2 sm:w-auto">
+      <span className="text-sm font-medium">Unlimited mode</span>
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button
+            variant={enabled ? "default" : "outline"}
+            className={cn(
+              "h-8 min-w-40 gap-2 border-border/70 sm:h-9",
+              enabled ? "unlimited-button" : "unlimited-button-idle"
+            )}
+            disabled={refreshing}
+          >
+            <Sparkles className="size-4" />
+            {enabled ? "Bypass Active" : "Bypas Limit"}
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {enabled ? "Turn off bypass mode?" : "Bypass all budget limits?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {enabled
+                ? "Budget enforcement will resume immediately. API keys will be checked against their configured weekly limits again."
+                : "This temporarily bypasses all user budget limits. Every API key can be used freely with unlimited budget enforcement until you turn this mode off again."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => onToggleBypass(!enabled)}>
+              {enabled ? "Resume limits" : "Enable bypass"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  )
+}
+
 export function BudgetsTable({
   budgets,
+  budgetWindow,
   refreshing,
   onToggle,
+  onToggleBypass,
   onDelete,
-  onUpdateResetDate,
+  onUpdateBudgetWindow,
   onUpdateLimit,
 }: {
   budgets: BudgetRow[]
+  budgetWindow: BudgetWindow | null
   refreshing: boolean
   onToggle: (hash: string, enabled: boolean) => void
+  onToggleBypass: (enabled: boolean) => void
   onDelete: (hash: string) => void
-  onUpdateResetDate: (hash: string, date: string) => void
+  onUpdateBudgetWindow: (weekStartDate: string, nextResetDate: string) => void
   onUpdateLimit: (hash: string, limit: number) => void
 }) {
-  const [sortBy, setSortBy] = useState<"limit" | "usage">("limit")
+  const [sortBy, setSortBy] = useState<BudgetSortKey>("limit")
+  const bypassLimitEnabled = Boolean(budgetWindow?.bypass_limit_enabled)
 
   const sortedBudgets = useMemo(() => {
     return [...budgets].sort((a, b) => {
       if (sortBy === "limit") {
         return b.weekly_limit_usd - a.weekly_limit_usd
-      } else {
-        const aPercent = a.weekly_limit_usd > 0 ? a.spentUsd / a.weekly_limit_usd : 0
-        const bPercent = b.weekly_limit_usd > 0 ? b.spentUsd / b.weekly_limit_usd : 0
-        return bPercent - aPercent
       }
+
+      if (sortBy === "name") {
+        return (a.apiKeyName ?? a.api_key_hash).localeCompare(
+          b.apiKeyName ?? b.api_key_hash
+        )
+      }
+
+      const aPercent =
+        a.weekly_limit_usd > 0 ? a.spentUsd / a.weekly_limit_usd : 0
+      const bPercent =
+        b.weekly_limit_usd > 0 ? b.spentUsd / b.weekly_limit_usd : 0
+      return bPercent - aPercent
     })
   }, [budgets, sortBy])
 
@@ -379,27 +597,53 @@ export function BudgetsTable({
       )}
     >
       {refreshing ? <RefreshScrim /> : null}
-      <CardHeader className="flex flex-row items-center justify-between pb-4">
-        <div className="space-y-1.5">
-          <CardDescription>API key budgets</CardDescription>
-          <CardTitle>Weekly spending limits</CardTitle>
+      <CardHeader>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <CardDescription>API key budgets</CardDescription>
+            <CardTitle>Weekly spending limits</CardTitle>
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            <BypassLimitControl
+              enabled={bypassLimitEnabled}
+              refreshing={refreshing}
+              onToggleBypass={onToggleBypass}
+            />
+            <SharedBudgetWindowControl
+              budgetWindow={budgetWindow}
+              refreshing={refreshing}
+              onUpdateBudgetWindow={onUpdateBudgetWindow}
+            />
+            <div className="flex w-full flex-col gap-2 sm:w-auto">
+              <span className="text-sm font-medium">Order rows by</span>
+              <Select
+                value={sortBy}
+                onValueChange={(value: string | null) => {
+                  if (!value) return
+                  setSortBy(value as BudgetSortKey)
+                }}
+              >
+                <SelectTrigger className="min-w-44">
+                  <span className="truncate">{getSortLabel(sortBy)}</span>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>Ordering</SelectLabel>
+                    {BUDGET_SORT_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
         </div>
-        <Select value={sortBy} onValueChange={(val) => setSortBy(val as "limit" | "usage")}>
-          <SelectTrigger className="w-[180px] bg-background border-border/70">
-            <SelectValue placeholder="Sort by..." />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              <SelectLabel>Order by</SelectLabel>
-              <SelectItem value="limit">Highest Limit ($)</SelectItem>
-              <SelectItem value="usage">Highest Usage (%)</SelectItem>
-            </SelectGroup>
-          </SelectContent>
-        </Select>
       </CardHeader>
       <CardContent className="min-h-0 flex-1">
         <ScrollArea className="h-full rounded-lg border border-border/70">
-          <Table className="min-w-[1000px]">
+          <Table className="min-w-[820px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="sticky top-0 z-10 bg-card text-center">
@@ -417,12 +661,6 @@ export function BudgetsTable({
                 <TableHead className="sticky top-0 z-10 bg-card">
                   Usage
                 </TableHead>
-                <TableHead className="sticky top-0 z-10 bg-card">
-                  Week Period
-                </TableHead>
-                <TableHead className="sticky top-0 z-10 bg-card text-center">
-                  Reset in
-                </TableHead>
                 <TableHead className="sticky top-0 z-10 bg-card text-center">
                   Actions
                 </TableHead>
@@ -432,11 +670,11 @@ export function BudgetsTable({
               {budgets.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={8}
+                    colSpan={6}
                     className="h-32 text-center text-sm text-muted-foreground"
                   >
-                    No budgets configured. Use the management API to create
-                    budgets.
+                    No budgets configured. Create a budget above to start
+                    tracking weekly spending.
                   </TableCell>
                 </TableRow>
               ) : (
@@ -447,8 +685,8 @@ export function BudgetsTable({
                     index={index}
                     onToggle={onToggle}
                     onDelete={onDelete}
-                    onUpdateResetDate={onUpdateResetDate}
                     onUpdateLimit={onUpdateLimit}
+                    bypassLimitEnabled={bypassLimitEnabled}
                   />
                 ))
               )}
@@ -468,19 +706,17 @@ export function CreateBudgetForm({
   loading,
 }: {
   apiKeys: ApiKeyEntry[]
-  onCreate: (hash: string, limit: number, resetDate: string) => void
+  onCreate: (hash: string, limit: number) => void
   loading: boolean
 }) {
   const availableKeys = apiKeys.filter((k) => !k.hasBudget)
   const [selectedHash, setSelectedHash] = useState("")
   const [limit, setLimit] = useState("50")
-  const [resetDate, setResetDate] = useState<Date | undefined>(undefined)
-  const [isCalendarOpen, setIsCalendarOpen] = useState(false)
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!selectedHash || !limit || !resetDate) return
-    onCreate(selectedHash, Number(limit), format(resetDate, "yyyy-MM-dd"))
+    if (!selectedHash || !limit || Number(limit) <= 0) return
+    onCreate(selectedHash, Number(limit))
   }
 
   if (availableKeys.length === 0) {
@@ -504,12 +740,15 @@ export function CreateBudgetForm({
       <CardContent>
         <form
           onSubmit={handleSubmit}
-          className="flex flex-col gap-4 sm:flex-row sm:items-end sm:flex-wrap"
+          className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end"
         >
           <div className="min-w-[180px] flex-1 space-y-2">
             <label className="text-sm font-medium">API Key</label>
-            <Select value={selectedHash} onValueChange={(val) => setSelectedHash(val ?? "")}>
-              <SelectTrigger className="h-9 w-full bg-background border-border/70">
+            <Select
+              value={selectedHash}
+              onValueChange={(val) => setSelectedHash(val ?? "")}
+            >
+              <SelectTrigger className="h-9 w-full border-border/70 bg-background">
                 <SelectValue placeholder="Select key..." />
               </SelectTrigger>
               <SelectContent>
@@ -521,49 +760,26 @@ export function CreateBudgetForm({
               </SelectContent>
             </Select>
           </div>
-          <div className="w-full sm:w-[140px] space-y-2">
+          <div className="w-full space-y-2 sm:w-[140px]">
             <label className="text-sm font-medium">Weekly limit ($)</label>
             <div className="relative">
-              <DollarSign className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+              <DollarSign className="absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
               <Input
                 type="number"
                 value={limit}
                 onChange={(e) => setLimit(e.target.value)}
                 min="0.01"
                 step="0.01"
-                className="h-9 pl-8 bg-background border-border/70"
+                className="h-9 border-border/70 bg-background pl-8"
               />
             </div>
           </div>
-          <div className="w-full sm:w-[200px] space-y-2">
-            <label className="text-sm font-medium">Reset date</label>
-            <Popover open={isCalendarOpen} onOpenChange={setIsCalendarOpen}>
-              <PopoverTrigger render={
-                <Button
-                  variant="outline"
-                  className={cn(
-                    "w-full h-9 justify-start text-left font-normal bg-background border-border/70",
-                    !resetDate && "text-muted-foreground"
-                  )}
-                >
-                  <CalendarIcon className="mr-2 size-4" />
-                  {resetDate ? format(resetDate, "PPP") : <span>Pick a date</span>}
-                </Button>
-              } />
-              <PopoverContent className="w-auto p-0" align="start">
-                <Calendar
-                  mode="single"
-                  selected={resetDate}
-                  onSelect={(date) => {
-                    setResetDate(date)
-                    setIsCalendarOpen(false)
-                  }}
-                  initialFocus
-                />
-              </PopoverContent>
-            </Popover>
-          </div>
-          <Button type="submit" size="sm" className="h-9 w-full sm:w-auto" disabled={loading || !selectedHash || !resetDate}>
+          <Button
+            type="submit"
+            size="sm"
+            className="h-9 w-full sm:w-auto"
+            disabled={loading || !selectedHash || Number(limit) <= 0}
+          >
             Create
           </Button>
         </form>

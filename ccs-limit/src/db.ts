@@ -29,7 +29,21 @@ export function getBudgetDb(): Database {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS budget_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
   return db;
+}
+
+export interface BudgetWindow {
+  week_start_date: string;
+  next_reset_date: string;
+  bypass_limit_enabled: boolean;
 }
 
 export interface BudgetRow {
@@ -42,25 +56,157 @@ export interface BudgetRow {
   updated_at: string;
 }
 
-export function getAllBudgets(): BudgetRow[] {
+function readSetting(d: Database, key: string): string | null {
+  const row = d
+    .query("SELECT value FROM budget_settings WHERE key = ?")
+    .get(key) as { value: string } | null;
+  return row?.value ?? null;
+}
+
+function writeSetting(d: Database, key: string, value: string): void {
+  d.run(
+    `INSERT INTO budget_settings (key, value, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+    [key, value],
+  );
+}
+
+function readBudgetWindow(d: Database): BudgetWindow | null {
+  const rows = d
+    .query(
+      "SELECT key, value FROM budget_settings WHERE key IN ('week_start_date', 'next_reset_date')",
+    )
+    .all() as Array<{ key: string; value: string }>;
+  const settings = new Map(rows.map((row) => [row.key, row.value]));
+  const weekStart = settings.get("week_start_date");
+  const nextReset = settings.get("next_reset_date");
+
+  if (!weekStart || !nextReset) return null;
+  return {
+    week_start_date: weekStart,
+    next_reset_date: nextReset,
+    bypass_limit_enabled: readBudgetBypassEnabled(d),
+  };
+}
+
+function writeBudgetWindow(d: Database, window: BudgetWindow): void {
+  writeSetting(d, "week_start_date", window.week_start_date);
+  writeSetting(d, "next_reset_date", window.next_reset_date);
+}
+
+function readBudgetBypassEnabled(d: Database): boolean {
+  return readSetting(d, "bypass_limit_enabled") === "true";
+}
+
+export function isBudgetBypassEnabled(): boolean {
+  return readBudgetBypassEnabled(getBudgetDb());
+}
+
+export function setBudgetBypassEnabled(enabled: boolean): boolean {
+  writeSetting(
+    getBudgetDb(),
+    "bypass_limit_enabled",
+    enabled ? "true" : "false",
+  );
+  return enabled;
+}
+
+function syncBudgetsToWindow(d: Database, window: BudgetWindow): void {
+  d.run(
+    `UPDATE budgets
+     SET week_start_date = ?, next_reset_date = ?, updated_at = datetime('now')
+     WHERE week_start_date != ? OR next_reset_date != ?`,
+    [
+      window.week_start_date,
+      window.next_reset_date,
+      window.week_start_date,
+      window.next_reset_date,
+    ],
+  );
+}
+
+export function getBudgetWindow(): BudgetWindow {
   const d = getBudgetDb();
-  return d.query("SELECT * FROM budgets ORDER BY created_at DESC").all() as BudgetRow[];
+  let window = readBudgetWindow(d);
+
+  if (!window) {
+    const existing = d
+      .query(
+        "SELECT week_start_date, next_reset_date FROM budgets ORDER BY created_at DESC LIMIT 1",
+      )
+      .get() as BudgetWindow | null;
+    window = existing ?? {
+      week_start_date: todayDate(),
+      next_reset_date: addDays(todayDate(), 7),
+      bypass_limit_enabled: readBudgetBypassEnabled(d),
+    };
+    writeBudgetWindow(d, window);
+  }
+
+  let weekStart = window.week_start_date;
+  let nextReset = window.next_reset_date;
+  const today = todayDate();
+  while (today >= nextReset) {
+    weekStart = nextReset;
+    nextReset = addDays(nextReset, 7);
+  }
+
+  const advanced = {
+    week_start_date: weekStart,
+    next_reset_date: nextReset,
+    bypass_limit_enabled: readBudgetBypassEnabled(d),
+  };
+  if (
+    advanced.week_start_date !== window.week_start_date ||
+    advanced.next_reset_date !== window.next_reset_date
+  ) {
+    writeBudgetWindow(d, advanced);
+  }
+
+  syncBudgetsToWindow(d, advanced);
+  return advanced;
+}
+
+export function setBudgetWindow(
+  weekStartDate: string,
+  nextResetDate: string,
+): BudgetWindow {
+  const d = getBudgetDb();
+  const window = {
+    week_start_date: weekStartDate,
+    next_reset_date: nextResetDate,
+    bypass_limit_enabled: readBudgetBypassEnabled(d),
+  };
+  writeBudgetWindow(d, window);
+  syncBudgetsToWindow(d, window);
+  return window;
+}
+
+export function getAllBudgets(): BudgetRow[] {
+  getBudgetWindow();
+  const d = getBudgetDb();
+  return d
+    .query("SELECT * FROM budgets ORDER BY created_at DESC")
+    .all() as BudgetRow[];
 }
 
 export function getBudget(hash: string): BudgetRow | null {
+  getBudgetWindow();
   const d = getBudgetDb();
-  const rows = d.query("SELECT * FROM budgets WHERE api_key_hash = ?").all(hash) as BudgetRow[];
+  const rows = d
+    .query("SELECT * FROM budgets WHERE api_key_hash = ?")
+    .all(hash) as BudgetRow[];
   return rows[0] ?? null;
 }
 
 export function upsertBudget(
   hash: string,
   weeklyLimitUsd: number,
-  weekStartDate: string,
-  nextResetDate: string,
-  enabled = true
+  enabled = true,
 ): BudgetRow {
   const d = getBudgetDb();
+  const window = getBudgetWindow();
   d.run(
     `INSERT INTO budgets (api_key_hash, weekly_limit_usd, week_start_date, next_reset_date, enabled, updated_at)
      VALUES (?, ?, ?, ?, ?, datetime('now'))
@@ -70,31 +216,51 @@ export function upsertBudget(
        next_reset_date = excluded.next_reset_date,
        enabled = excluded.enabled,
        updated_at = datetime('now')`,
-    [hash, weeklyLimitUsd, weekStartDate, nextResetDate, enabled ? 1 : 0]
+    [
+      hash,
+      weeklyLimitUsd,
+      window.week_start_date,
+      window.next_reset_date,
+      enabled ? 1 : 0,
+    ],
   );
   return getBudget(hash)!;
 }
 
-export function updateResetDate(hash: string, nextResetDate: string): BudgetRow | null {
-  const d = getBudgetDb();
+export function updateResetDate(
+  hash: string,
+  nextResetDate: string,
+): BudgetRow | null {
   const existing = getBudget(hash);
   if (!existing) return null;
 
-  d.run(
-    `UPDATE budgets SET next_reset_date = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
-    [nextResetDate, hash]
-  );
+  setBudgetWindow(existing.week_start_date, nextResetDate);
   return getBudget(hash);
 }
 
-export function setBudgetEnabled(hash: string, enabled: boolean): BudgetRow | null {
+export function updateBudgetDateRange(
+  hash: string,
+  weekStartDate: string,
+  nextResetDate: string,
+): BudgetRow | null {
+  const existing = getBudget(hash);
+  if (!existing) return null;
+
+  setBudgetWindow(weekStartDate, nextResetDate);
+  return getBudget(hash);
+}
+
+export function setBudgetEnabled(
+  hash: string,
+  enabled: boolean,
+): BudgetRow | null {
   const d = getBudgetDb();
   const existing = getBudget(hash);
   if (!existing) return null;
 
   d.run(
     `UPDATE budgets SET enabled = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
-    [enabled ? 1 : 0, hash]
+    [enabled ? 1 : 0, hash],
   );
   return getBudget(hash);
 }
@@ -106,7 +272,7 @@ export function updateLimit(hash: string, limitUsd: number): BudgetRow | null {
 
   d.run(
     `UPDATE budgets SET weekly_limit_usd = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
-    [limitUsd, hash]
+    [limitUsd, hash],
   );
   return getBudget(hash);
 }
@@ -122,21 +288,11 @@ export function deleteBudget(hash: string): boolean {
  * Returns the (possibly updated) budget row.
  */
 export function autoAdvanceWeek(budget: BudgetRow): BudgetRow {
-  const today = todayDate();
-  if (today < budget.next_reset_date) return budget;
-
-  const d = getBudgetDb();
-  const newWeekStart = budget.next_reset_date;
-  const newNextReset = addDays(newWeekStart, 7);
-
-  d.run(
-    `UPDATE budgets SET week_start_date = ?, next_reset_date = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
-    [newWeekStart, newNextReset, budget.api_key_hash]
-  );
+  const window = getBudgetWindow();
   return {
     ...budget,
-    week_start_date: newWeekStart,
-    next_reset_date: newNextReset,
+    week_start_date: window.week_start_date,
+    next_reset_date: window.next_reset_date,
   };
 }
 

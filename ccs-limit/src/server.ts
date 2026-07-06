@@ -1,16 +1,24 @@
 import http from "node:http";
 import https from "node:https";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { pipeline, Readable } from "node:stream";
 import type { Duplex } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import YAML from "yaml";
 import { config } from "./config";
 import { signJwt, verifyJwt, validateCredentials } from "./auth";
 import { hashApiKey, providerKeyFromApiKey } from "./pricing";
 import {
   getBudget,
   getAllBudgets,
+  getBudgetWindow,
+  isBudgetBypassEnabled,
+  setBudgetBypassEnabled,
+  setBudgetWindow,
   upsertBudget,
   updateResetDate,
+  updateBudgetDateRange,
   setBudgetEnabled,
   updateLimit,
   deleteBudget,
@@ -22,7 +30,10 @@ import { getWeeklyCost } from "./usage";
 import { resolveApiKeys } from "./api-keys";
 import { ok, fail, extractBearerToken, CORS_HEADERS } from "./response";
 
-type NodeHandler = (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>;
+type NodeHandler = (
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+) => Promise<void>;
 
 const HOP_BY_HOP_REQUEST_HEADERS = new Set([
   "connection",
@@ -44,8 +55,50 @@ const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+const CODEX_BACKEND_BASE_URL = "https://chatgpt.com/backend-api";
+const CODEX_USER_AGENT = "codex-cli";
 
-function extractApiKeyFromAuthHeader(authHeader: string | undefined): string | null {
+type CodexAuthFile = {
+  access_token?: string;
+  account_id?: string;
+  tokens?: {
+    access_token?: string;
+    account_id?: string;
+  };
+};
+
+type CodexUsageWindow = {
+  used_percent?: number;
+  usedPercent?: number;
+};
+
+type CodexUsageResponse = {
+  rate_limit_reset_credits?: {
+    available_count?: number | string | null;
+  } | null;
+  rateLimitResetCredits?: {
+    available_count?: number | string | null;
+    availableCount?: number | string | null;
+  } | null;
+  rate_limit?: {
+    secondary_window?: CodexUsageWindow | null;
+    secondaryWindow?: CodexUsageWindow | null;
+  } | null;
+  rateLimit?: {
+    secondary_window?: CodexUsageWindow | null;
+    secondaryWindow?: CodexUsageWindow | null;
+  } | null;
+};
+
+type CodexConsumeResponse = {
+  code?: string;
+  windows_reset?: number;
+  windowsReset?: number;
+};
+
+function extractApiKeyFromAuthHeader(
+  authHeader: string | undefined,
+): string | null {
   if (!authHeader?.startsWith("Bearer ")) return null;
   return authHeader.slice(7).trim() || null;
 }
@@ -63,16 +116,51 @@ function requiresBudgetPrecheck(pathname: string): boolean {
 }
 
 function isLocalApiRoute(pathname: string, method: string): boolean {
+  const redeemMatch = pathname.match(
+    /^\/api\/codex-resets\/([^/]+)\/redeem$/,
+  );
+
+  if (method === "OPTIONS") {
+    return (
+      pathname === "/api/auth/login" ||
+      pathname === "/api/public/budgets" ||
+      pathname === "/api/budgets" ||
+      pathname === "/api/budgets/bypass" ||
+      pathname === "/api/budgets/window" ||
+      pathname === "/api/keys" ||
+      /^\/api\/budgets\/([a-f0-9]+)$/.test(pathname) ||
+      /^\/api\/budgets\/([a-f0-9]+)\/reset-date$/.test(pathname) ||
+      /^\/api\/budgets\/([a-f0-9]+)\/date-range$/.test(pathname) ||
+      /^\/api\/budgets\/([a-f0-9]+)\/limit$/.test(pathname) ||
+      /^\/api\/budgets\/([a-f0-9]+)\/enabled$/.test(pathname) ||
+      Boolean(redeemMatch)
+    );
+  }
+
   if (pathname === "/api/auth/login" && method === "POST") return true;
   if (pathname === "/api/public/budgets" && method === "GET") return true;
-  if (pathname === "/api/budgets" && (method === "GET" || method === "POST")) return true;
+  if (pathname === "/api/budgets" && (method === "GET" || method === "POST"))
+    return true;
+  if (pathname === "/api/budgets/bypass" && method === "PUT") return true;
+  if (
+    pathname === "/api/budgets/window" &&
+    (method === "GET" || method === "PUT")
+  )
+    return true;
   if (pathname === "/api/keys" && method === "GET") return true;
 
   const budgetMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)$/);
   if (budgetMatch && (method === "GET" || method === "DELETE")) return true;
 
-  const resetMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)\/reset-date$/);
+  const resetMatch = pathname.match(
+    /^\/api\/budgets\/([a-f0-9]+)\/reset-date$/,
+  );
   if (resetMatch && method === "PUT") return true;
+
+  const rangeMatch = pathname.match(
+    /^\/api\/budgets\/([a-f0-9]+)\/date-range$/,
+  );
+  if (rangeMatch && method === "PUT") return true;
 
   const limitMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)\/limit$/);
   if (limitMatch && method === "PUT") return true;
@@ -80,7 +168,16 @@ function isLocalApiRoute(pathname: string, method: string): boolean {
   const toggleMatch = pathname.match(/^\/api\/budgets\/([a-f0-9]+)\/enabled$/);
   if (toggleMatch && method === "PUT") return true;
 
+  if (redeemMatch && method === "POST") return true;
+
   return false;
+}
+
+function shouldProxyApiRequestWithoutBudgetCheck(
+  pathname: string,
+  method: string,
+): boolean {
+  return pathname.startsWith("/api/") && !isLocalApiRoute(pathname, method);
 }
 
 function createNodeRequest(req: http.IncomingMessage): Request {
@@ -99,7 +196,10 @@ function createNodeRequest(req: http.IncomingMessage): Request {
   return new Request(new URL(req.url || "/", origin), init);
 }
 
-async function writeNodeResponse(res: http.ServerResponse, response: Response): Promise<void> {
+async function writeNodeResponse(
+  res: http.ServerResponse,
+  response: Response,
+): Promise<void> {
   res.statusCode = response.status;
   res.statusMessage = response.statusText;
 
@@ -122,7 +222,7 @@ async function writeNodeResponse(res: http.ServerResponse, response: Response): 
           return;
         }
         resolve();
-      }
+      },
     );
   });
 }
@@ -130,7 +230,7 @@ async function writeNodeResponse(res: http.ServerResponse, response: Response): 
 function cloneProxyHeaders(
   headers: http.IncomingHttpHeaders,
   target: URL,
-  isUpgrade: boolean
+  isUpgrade: boolean,
 ): http.OutgoingHttpHeaders {
   const outgoing: http.OutgoingHttpHeaders = {};
 
@@ -158,7 +258,7 @@ function writeUpgradeFailure(
   socket: Duplex,
   statusCode: number,
   statusText: string,
-  payload: unknown
+  payload: unknown,
 ): void {
   const body = JSON.stringify(payload);
   socket.write(
@@ -169,12 +269,14 @@ function writeUpgradeFailure(
       "Connection: close",
       "",
       body,
-    ].join("\r\n")
+    ].join("\r\n"),
   );
   socket.destroy();
 }
 
-function proxyErrorPayload(message: string): { error: { message: string; type: string } } {
+function proxyErrorPayload(message: string): {
+  error: { message: string; type: string };
+} {
   return {
     error: {
       message,
@@ -189,6 +291,163 @@ async function requireAdmin(req: Request): Promise<Response | null> {
   const payload = await verifyJwt(token);
   if (!payload) return fail("Invalid or expired token", 401);
   return null;
+}
+
+async function readText(filePath: string): Promise<string | null> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function resolveCodexAuthDir(): Promise<string> {
+  const configPath = path.join(config.cliproxyConfigDir, "config.yaml");
+  const raw = await readText(configPath);
+  if (!raw) return path.join(config.cliproxyConfigDir, "auth");
+
+  try {
+    const parsed = YAML.parse(raw) as { "auth-dir"?: string } | null;
+    const configuredAuthDir = parsed?.["auth-dir"]?.trim();
+    return configuredAuthDir || path.join(config.cliproxyConfigDir, "auth");
+  } catch {
+    return path.join(config.cliproxyConfigDir, "auth");
+  }
+}
+
+function getCodexResetCreditCount(usage: CodexUsageResponse): number {
+  const raw =
+    usage.rate_limit_reset_credits?.available_count ??
+    usage.rateLimitResetCredits?.available_count ??
+    usage.rateLimitResetCredits?.availableCount;
+
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return Math.max(0, Math.floor(raw));
+  }
+  if (typeof raw === "string" && /^\d+$/.test(raw)) {
+    return Number(raw);
+  }
+  return 0;
+}
+
+function getWeeklyUsedPercent(usage: CodexUsageResponse): number | null {
+  const rateLimit = usage.rate_limit || usage.rateLimit;
+  const weekly = rateLimit?.secondary_window || rateLimit?.secondaryWindow;
+  const raw = weekly?.used_percent ?? weekly?.usedPercent;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+  return Math.max(0, Math.min(100, raw));
+}
+
+async function loadCodexAuth(accountId: string): Promise<{
+  accessToken: string;
+  accountId: string | null;
+}> {
+  const decoded = decodeURIComponent(accountId);
+  if (
+    !decoded ||
+    decoded !== path.basename(decoded) ||
+    !decoded.startsWith("codex") ||
+    !decoded.endsWith(".json")
+  ) {
+    throw new Error("Invalid Codex account id");
+  }
+
+  const authDir = await resolveCodexAuthDir();
+  const candidates = [
+    path.join(authDir, decoded),
+    path.join(path.dirname(authDir), "auth-paused", decoded),
+  ];
+
+  for (const candidate of candidates) {
+    const raw = await readText(candidate);
+    if (!raw) continue;
+
+    let parsed: CodexAuthFile;
+    try {
+      parsed = JSON.parse(raw) as CodexAuthFile;
+    } catch {
+      throw new Error("Codex auth file is not valid JSON");
+    }
+
+    const accessToken =
+      parsed.access_token?.trim() || parsed.tokens?.access_token?.trim();
+    const chatgptAccountId =
+      parsed.account_id?.trim() || parsed.tokens?.account_id?.trim() || null;
+
+    if (!accessToken) {
+      throw new Error("Codex auth file does not contain an access token");
+    }
+
+    return { accessToken, accountId: chatgptAccountId };
+  }
+
+  throw new Error("Codex account auth file was not found");
+}
+
+async function requestCodexJson<T>(
+  method: string,
+  url: string,
+  auth: { accessToken: string; accountId: string | null },
+  payload?: unknown,
+): Promise<T> {
+  const response = await fetch(url, {
+    method,
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${auth.accessToken}`,
+      "User-Agent": CODEX_USER_AGENT,
+      ...(auth.accountId ? { "ChatGPT-Account-ID": auth.accountId } : {}),
+      ...(payload ? { "Content-Type": "application/json" } : {}),
+    },
+    body: payload ? JSON.stringify(payload) : undefined,
+  });
+  const data = (await response.json().catch(() => null)) as unknown;
+
+  if (!response.ok) {
+    throw new Error(`Codex request failed with HTTP ${response.status}`);
+  }
+  if (!data || typeof data !== "object") {
+    throw new Error("Codex request returned an invalid response");
+  }
+
+  return data as T;
+}
+
+async function handleRedeemCodexReset(accountId: string): Promise<Response> {
+  try {
+    const auth = await loadCodexAuth(accountId);
+    const usage = await requestCodexJson<CodexUsageResponse>(
+      "GET",
+      `${CODEX_BACKEND_BASE_URL}/wham/usage`,
+      auth,
+    );
+    const resetCredits = getCodexResetCreditCount(usage);
+    if (resetCredits < 1) return fail("No unused reset credits available");
+
+    const weeklyUsedPercent = getWeeklyUsedPercent(usage);
+    if (weeklyUsedPercent === null) {
+      return fail("Weekly limit state is unavailable");
+    }
+    if (weeklyUsedPercent < 100) {
+      return fail("Weekly limit is not exhausted yet");
+    }
+
+    const redeemRequestId = crypto.randomUUID();
+    const result = await requestCodexJson<CodexConsumeResponse>(
+      "POST",
+      `${CODEX_BACKEND_BASE_URL}/wham/rate-limit-reset-credits/consume`,
+      auth,
+      { redeem_request_id: redeemRequestId },
+    );
+
+    return ok({
+      ...result,
+      redeemRequestId,
+      resetCreditsBefore: resetCredits,
+    });
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : "Redeem failed", 500);
+  }
 }
 
 async function handleLogin(req: Request): Promise<Response> {
@@ -215,31 +474,38 @@ async function handleLogin(req: Request): Promise<Response> {
 async function handleListBudgets(): Promise<Response> {
   const budgets = getAllBudgets();
   const today = todayDate();
+  const allKeys = await resolveApiKeys();
+  const bypassLimitEnabled = isBudgetBypassEnabled();
 
   const enriched = await Promise.all(
     budgets.map(async (b) => {
       const b2 = autoAdvanceWeek(b);
       const providerKey = `api-key:${b2.api_key_hash}`;
-      const spent = getWeeklyCost(providerKey, b2.week_start_date, b2.next_reset_date);
-      const allKeys = await resolveApiKeys();
+      const spent = getWeeklyCost(
+        providerKey,
+        b2.week_start_date,
+        b2.next_reset_date,
+      );
       const matched = allKeys.find((k) => k.hash === b2.api_key_hash);
       return {
         ...b2,
         apiKeyName: matched?.name ?? null,
         spentUsd: spent,
         remainingUsd: Math.max(0, b2.weekly_limit_usd - spent),
-        percentUsed: b2.weekly_limit_usd > 0 ? (spent / b2.weekly_limit_usd) * 100 : 0,
-        isOverBudget: spent >= b2.weekly_limit_usd,
+        percentUsed:
+          b2.weekly_limit_usd > 0 ? (spent / b2.weekly_limit_usd) * 100 : 0,
+        isOverBudget: bypassLimitEnabled ? false : spent >= b2.weekly_limit_usd,
         daysUntilReset: Math.max(
           0,
           Math.ceil(
             (new Date(b2.next_reset_date + "T00:00:00Z").getTime() -
               new Date(today + "T00:00:00Z").getTime()) /
-              86400000
-          )
+              86400000,
+          ),
         ),
+        bypassLimitEnabled,
       };
-    })
+    }),
   );
 
   return ok(enriched);
@@ -249,9 +515,14 @@ async function handleGetBudget(hash: string): Promise<Response> {
   let budget = getBudget(hash);
   if (!budget) return fail("Budget not found", 404);
   budget = autoAdvanceWeek(budget);
+  const bypassLimitEnabled = isBudgetBypassEnabled();
 
   const providerKey = `api-key:${budget.api_key_hash}`;
-  const spent = getWeeklyCost(providerKey, budget.week_start_date, budget.next_reset_date);
+  const spent = getWeeklyCost(
+    providerKey,
+    budget.week_start_date,
+    budget.next_reset_date,
+  );
   const allKeys = await resolveApiKeys();
   const matched = allKeys.find((k) => k.hash === budget.api_key_hash);
 
@@ -260,8 +531,101 @@ async function handleGetBudget(hash: string): Promise<Response> {
     apiKeyName: matched?.name ?? null,
     spentUsd: spent,
     remainingUsd: Math.max(0, budget.weekly_limit_usd - spent),
-    percentUsed: budget.weekly_limit_usd > 0 ? (spent / budget.weekly_limit_usd) * 100 : 0,
-    isOverBudget: spent >= budget.weekly_limit_usd,
+    percentUsed:
+      budget.weekly_limit_usd > 0 ? (spent / budget.weekly_limit_usd) * 100 : 0,
+    isOverBudget: bypassLimitEnabled ? false : spent >= budget.weekly_limit_usd,
+    daysUntilReset: Math.max(
+      0,
+      Math.ceil(
+        (new Date(budget.next_reset_date + "T00:00:00Z").getTime() -
+          new Date(todayDate() + "T00:00:00Z").getTime()) /
+          86400000,
+      ),
+    ),
+    bypassLimitEnabled,
+  });
+}
+
+function validateBudgetWindow(
+  weekStartDate: string | undefined,
+  nextResetDate: string | undefined,
+): string | null {
+  if (!weekStartDate) return "weekStartDate required";
+  if (!nextResetDate) return "nextResetDate required";
+  if (nextResetDate <= weekStartDate) {
+    return "nextResetDate must be after weekStartDate";
+  }
+
+  const today = todayDate();
+  if (nextResetDate < today) {
+    return "nextResetDate cannot be in the past";
+  }
+
+  const maxReset = addDays(weekStartDate, 7);
+  if (nextResetDate > maxReset) {
+    return "nextResetDate cannot be more than 7 days after weekStartDate";
+  }
+
+  return null;
+}
+
+async function handleGetBudgetWindow(): Promise<Response> {
+  const window = getBudgetWindow();
+  const today = todayDate();
+
+  return ok({
+    ...window,
+    daysUntilReset: Math.max(
+      0,
+      Math.ceil(
+        (new Date(window.next_reset_date + "T00:00:00Z").getTime() -
+          new Date(today + "T00:00:00Z").getTime()) /
+          86400000,
+      ),
+    ),
+  });
+}
+
+async function handleUpdateBudgetWindow(req: Request): Promise<Response> {
+  let body: { weekStartDate?: string; nextResetDate?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return fail("Invalid JSON body");
+  }
+
+  const validationError = validateBudgetWindow(
+    body.weekStartDate,
+    body.nextResetDate,
+  );
+  if (validationError) return fail(validationError);
+
+  const window = setBudgetWindow(body.weekStartDate!, body.nextResetDate!);
+  return ok({
+    ...window,
+    daysUntilReset: Math.max(
+      0,
+      Math.ceil(
+        (new Date(window.next_reset_date + "T00:00:00Z").getTime() -
+          new Date(todayDate() + "T00:00:00Z").getTime()) /
+          86400000,
+      ),
+    ),
+  });
+}
+
+async function handleUpdateBudgetBypass(req: Request): Promise<Response> {
+  let body: { enabled?: boolean };
+  try {
+    body = await req.json();
+  } catch {
+    return fail("Invalid JSON body");
+  }
+  if (typeof body.enabled !== "boolean") return fail("enabled must be boolean");
+
+  const enabled = setBudgetBypassEnabled(body.enabled);
+  return ok({
+    enabled,
   });
 }
 
@@ -280,36 +644,22 @@ async function handleCreateBudget(req: Request): Promise<Response> {
     return fail("Invalid JSON body");
   }
 
-  const hash = body.apiKeyHash || (body.apiKey ? hashApiKey(body.apiKey) : null);
+  const hash =
+    body.apiKeyHash || (body.apiKey ? hashApiKey(body.apiKey) : null);
   if (!hash) return fail("apiKeyHash or apiKey required");
   if (!body.weeklyLimitUsd || body.weeklyLimitUsd <= 0) {
     return fail("weeklyLimitUsd must be > 0");
   }
 
-  const today = todayDate();
-  const weekStart = body.weekStartDate || today;
-  const nextReset = body.nextResetDate || addDays(weekStart, 7);
-
-  if (nextReset <= weekStart) {
-    return fail("nextResetDate must be after weekStartDate");
-  }
-  const maxReset = addDays(weekStart, 7);
-  if (nextReset > maxReset) {
-    return fail("nextResetDate cannot be more than 7 days after weekStartDate");
-  }
-
-  const budget = upsertBudget(
-    hash,
-    body.weeklyLimitUsd,
-    weekStart,
-    nextReset,
-    body.enabled ?? true
-  );
+  const budget = upsertBudget(hash, body.weeklyLimitUsd, body.enabled ?? true);
 
   return ok(budget);
 }
 
-async function handleUpdateResetDate(hash: string, req: Request): Promise<Response> {
+async function handleUpdateResetDate(
+  hash: string,
+  req: Request,
+): Promise<Response> {
   let body: { nextResetDate?: string };
   try {
     body = await req.json();
@@ -321,20 +671,47 @@ async function handleUpdateResetDate(hash: string, req: Request): Promise<Respon
   const existing = getBudget(hash);
   if (!existing) return fail("Budget not found", 404);
 
-  const today = todayDate();
-  if (body.nextResetDate < today) {
-    return fail("nextResetDate cannot be in the past");
-  }
-  const maxReset = addDays(existing.week_start_date, 7);
-  if (body.nextResetDate > maxReset) {
-    return fail("nextResetDate cannot be more than 7 days after current weekStartDate");
-  }
+  const validationError = validateBudgetWindow(
+    existing.week_start_date,
+    body.nextResetDate,
+  );
+  if (validationError) return fail(validationError);
 
   const updated = updateResetDate(hash, body.nextResetDate);
   return ok(updated);
 }
 
-async function handleUpdateLimit(hash: string, req: Request): Promise<Response> {
+async function handleUpdateBudgetDateRange(
+  hash: string,
+  req: Request,
+): Promise<Response> {
+  let body: { weekStartDate?: string; nextResetDate?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return fail("Invalid JSON body");
+  }
+  const existing = getBudget(hash);
+  if (!existing) return fail("Budget not found", 404);
+
+  const validationError = validateBudgetWindow(
+    body.weekStartDate,
+    body.nextResetDate,
+  );
+  if (validationError) return fail(validationError);
+
+  const updated = updateBudgetDateRange(
+    hash,
+    body.weekStartDate!,
+    body.nextResetDate!,
+  );
+  return ok(updated);
+}
+
+async function handleUpdateLimit(
+  hash: string,
+  req: Request,
+): Promise<Response> {
   let body: { weeklyLimitUsd?: number };
   try {
     body = await req.json();
@@ -350,7 +727,10 @@ async function handleUpdateLimit(hash: string, req: Request): Promise<Response> 
   return ok(updated);
 }
 
-async function handleToggleBudget(hash: string, req: Request): Promise<Response> {
+async function handleToggleBudget(
+  hash: string,
+  req: Request,
+): Promise<Response> {
   let body: { enabled?: boolean };
   try {
     body = await req.json();
@@ -381,13 +761,13 @@ async function handleListApiKeys(): Promise<Response> {
       name: k.name,
       hasBudget: budgetMap.has(k.hash),
       budget: budgetMap.get(k.hash) ?? null,
-    }))
+    })),
   );
 }
 
 async function proxyUpstreamHttp(
   req: http.IncomingMessage,
-  res: http.ServerResponse
+  res: http.ServerResponse,
 ): Promise<void> {
   const target = new URL(req.url || "/", config.upstreamUrl);
   const transport = target.protocol === "https:" ? https : http;
@@ -404,7 +784,10 @@ async function proxyUpstreamHttp(
       },
       (upstreamRes) => {
         for (const [key, value] of Object.entries(upstreamRes.headers)) {
-          if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())) {
+          if (
+            value === undefined ||
+            HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())
+          ) {
             continue;
           }
           res.setHeader(key, value);
@@ -412,15 +795,15 @@ async function proxyUpstreamHttp(
 
         res.writeHead(upstreamRes.statusCode || 502, upstreamRes.statusMessage);
         pipeline(upstreamRes, res, () => resolve());
-      }
+      },
     );
 
     upstreamReq.on("error", (err) => {
       if (!res.headersSent) {
         const body = JSON.stringify(
           proxyErrorPayload(
-            `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`
-          )
+            `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
         );
         res.writeHead(502, {
           "Content-Type": "application/json",
@@ -439,7 +822,11 @@ async function proxyUpstreamHttp(
   });
 }
 
-function proxyUpstreamUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+function proxyUpstreamUpgrade(
+  req: http.IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+): void {
   const target = new URL(req.url || "/", config.upstreamUrl);
   const transport = target.protocol === "https:" ? https : http;
 
@@ -459,7 +846,9 @@ function proxyUpstreamUpgrade(req: http.IncomingMessage, socket: Duplex, head: B
   };
 
   upstreamReq.on("upgrade", (upstreamRes, upstreamSocket, upstreamHead) => {
-    const lines = [`HTTP/${upstreamRes.httpVersion} 101 ${upstreamRes.statusMessage || "Switching Protocols"}`];
+    const lines = [
+      `HTTP/${upstreamRes.httpVersion} 101 ${upstreamRes.statusMessage || "Switching Protocols"}`,
+    ];
     for (const [key, value] of Object.entries(upstreamRes.headers)) {
       if (value === undefined) {
         continue;
@@ -498,9 +887,14 @@ function proxyUpstreamUpgrade(req: http.IncomingMessage, socket: Duplex, head: B
     });
     upstreamRes.on("end", () => {
       const body = Buffer.concat(bodyChunks);
-      const lines = [`HTTP/${upstreamRes.httpVersion} ${upstreamRes.statusCode || 502} ${upstreamRes.statusMessage || "Bad Gateway"}`];
+      const lines = [
+        `HTTP/${upstreamRes.httpVersion} ${upstreamRes.statusCode || 502} ${upstreamRes.statusMessage || "Bad Gateway"}`,
+      ];
       for (const [key, value] of Object.entries(upstreamRes.headers)) {
-        if (value === undefined || HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())) {
+        if (
+          value === undefined ||
+          HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())
+        ) {
           continue;
         }
         if (Array.isArray(value)) {
@@ -526,8 +920,8 @@ function proxyUpstreamUpgrade(req: http.IncomingMessage, socket: Duplex, head: B
       502,
       "Bad Gateway",
       proxyErrorPayload(
-        `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`
-      )
+        `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
     );
   });
 
@@ -560,26 +954,44 @@ function imitateCodexLimitResponse(resetDateStr?: string | null): Response {
         resets_in_seconds,
       },
     }),
-    { status: 429, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    {
+      status: 429,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+    },
   );
 }
 
-async function handleForward(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+async function handleForward(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
   const apiKey = extractApiKeyFromAuthHeader(
-    typeof req.headers.authorization === "string" ? req.headers.authorization : undefined
+    typeof req.headers.authorization === "string"
+      ? req.headers.authorization
+      : undefined,
   );
   if (!apiKey) {
     await writeNodeResponse(
       res,
       new Response(
-        JSON.stringify({ error: { message: "Missing API key", type: "invalid_request_error" } }),
-        { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      )
+        JSON.stringify({
+          error: { message: "Missing API key", type: "invalid_request_error" },
+        }),
+        {
+          status: 401,
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        },
+      ),
     );
     return;
   }
 
   const hash = hashApiKey(apiKey);
+  if (isBudgetBypassEnabled()) {
+    await proxyUpstreamHttp(req, res);
+    return;
+  }
+
   let budget = getBudget(hash);
 
   if (!budget || !budget.enabled) {
@@ -589,10 +1001,17 @@ async function handleForward(req: http.IncomingMessage, res: http.ServerResponse
 
   budget = autoAdvanceWeek(budget);
   const providerKey = providerKeyFromApiKey(apiKey);
-  const spent = getWeeklyCost(providerKey, budget.week_start_date, budget.next_reset_date);
+  const spent = getWeeklyCost(
+    providerKey,
+    budget.week_start_date,
+    budget.next_reset_date,
+  );
 
   if (spent >= budget.weekly_limit_usd) {
-    await writeNodeResponse(res, imitateCodexLimitResponse(budget.next_reset_date));
+    await writeNodeResponse(
+      res,
+      imitateCodexLimitResponse(budget.next_reset_date),
+    );
     return;
   }
 
@@ -600,7 +1019,10 @@ async function handleForward(req: http.IncomingMessage, res: http.ServerResponse
 }
 
 const handleHttpRequest: NodeHandler = async (req, res) => {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+  const url = new URL(
+    req.url || "/",
+    `http://${req.headers.host || "127.0.0.1"}`,
+  );
   const path = getRoutePath(url);
   const method = req.method || "GET";
 
@@ -611,8 +1033,8 @@ const handleHttpRequest: NodeHandler = async (req, res) => {
       return;
     }
 
-    if (!isLocalApiRoute(path, method)) {
-      await proxyUpstreamHttp(req, res);
+    if (shouldProxyApiRequestWithoutBudgetCheck(path, method)) {
+      await handleForward(req, res);
       return;
     }
 
@@ -642,6 +1064,18 @@ const handleHttpRequest: NodeHandler = async (req, res) => {
       await writeNodeResponse(res, await handleCreateBudget(webReq));
       return;
     }
+    if (path === "/api/budgets/bypass" && method === "PUT") {
+      await writeNodeResponse(res, await handleUpdateBudgetBypass(webReq));
+      return;
+    }
+    if (path === "/api/budgets/window" && method === "GET") {
+      await writeNodeResponse(res, await handleGetBudgetWindow());
+      return;
+    }
+    if (path === "/api/budgets/window" && method === "PUT") {
+      await writeNodeResponse(res, await handleUpdateBudgetWindow(webReq));
+      return;
+    }
 
     const budgetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)$/);
     if (budgetMatch) {
@@ -658,19 +1092,46 @@ const handleHttpRequest: NodeHandler = async (req, res) => {
 
     const resetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/reset-date$/);
     if (resetMatch && method === "PUT") {
-      await writeNodeResponse(res, await handleUpdateResetDate(resetMatch[1], webReq));
+      await writeNodeResponse(
+        res,
+        await handleUpdateResetDate(resetMatch[1], webReq),
+      );
+      return;
+    }
+
+    const rangeMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/date-range$/);
+    if (rangeMatch && method === "PUT") {
+      await writeNodeResponse(
+        res,
+        await handleUpdateBudgetDateRange(rangeMatch[1], webReq),
+      );
       return;
     }
 
     const limitMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/limit$/);
     if (limitMatch && method === "PUT") {
-      await writeNodeResponse(res, await handleUpdateLimit(limitMatch[1], webReq));
+      await writeNodeResponse(
+        res,
+        await handleUpdateLimit(limitMatch[1], webReq),
+      );
       return;
     }
 
     const toggleMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/enabled$/);
     if (toggleMatch && method === "PUT") {
-      await writeNodeResponse(res, await handleToggleBudget(toggleMatch[1], webReq));
+      await writeNodeResponse(
+        res,
+        await handleToggleBudget(toggleMatch[1], webReq),
+      );
+      return;
+    }
+
+    const redeemMatch = path.match(/^\/api\/codex-resets\/([^/]+)\/redeem$/);
+    if (redeemMatch && method === "POST") {
+      await writeNodeResponse(
+        res,
+        await handleRedeemCodexReset(redeemMatch[1]),
+      );
       return;
     }
 
@@ -681,7 +1142,10 @@ const handleHttpRequest: NodeHandler = async (req, res) => {
   }
 
   if (path === "/health") {
-    await writeNodeResponse(res, ok({ status: "ok", upstream: config.upstreamUrl }));
+    await writeNodeResponse(
+      res,
+      ok({ status: "ok", upstream: config.upstreamUrl }),
+    );
     return;
   }
 
@@ -705,46 +1169,103 @@ const server = http.createServer((req, res) => {
       new Response(
         JSON.stringify(
           proxyErrorPayload(
-            `Unhandled proxy failure: ${error instanceof Error ? error.message : String(error)}`
-          )
+            `Unhandled proxy failure: ${error instanceof Error ? error.message : String(error)}`,
+          ),
         ),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      )
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
     );
   });
 });
 
 server.on("upgrade", (req, socket, head) => {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+  const url = new URL(
+    req.url || "/",
+    `http://${req.headers.host || "127.0.0.1"}`,
+  );
   const path = getRoutePath(url);
   const method = req.method || "GET";
 
   if (path.startsWith("/api/")) {
-    if (!isLocalApiRoute(path, method)) {
+    if (shouldProxyApiRequestWithoutBudgetCheck(path, method)) {
+      if (requiresBudgetPrecheck(path)) {
+        const authHeader =
+          typeof req.headers.authorization === "string"
+            ? req.headers.authorization
+            : undefined;
+        const apiKey = extractApiKeyFromAuthHeader(authHeader);
+        if (!apiKey) {
+          writeUpgradeFailure(socket, 401, "Unauthorized", {
+            error: {
+              message: "Missing API key",
+              type: "invalid_request_error",
+            },
+          });
+          return;
+        }
+
+        if (isBudgetBypassEnabled()) {
+          proxyUpstreamUpgrade(req, socket, head);
+          return;
+        }
+
+        const hash = hashApiKey(apiKey);
+        let budget = getBudget(hash);
+
+        if (!budget || !budget.enabled) {
+          writeUpgradeFailure(socket, 429, "Too Many Requests", {
+            error: {
+              type: "usage_limit_reached",
+              message: "The usage limit has been reached",
+            },
+          });
+          return;
+        }
+
+        budget = autoAdvanceWeek(budget);
+        const providerKey = providerKeyFromApiKey(apiKey);
+        const spent = getWeeklyCost(
+          providerKey,
+          budget.week_start_date,
+          budget.next_reset_date,
+        );
+
+        if (spent >= budget.weekly_limit_usd) {
+          writeUpgradeFailure(socket, 429, "Too Many Requests", {
+            error: {
+              type: "usage_limit_reached",
+              message: "The usage limit has been reached",
+            },
+          });
+          return;
+        }
+      }
+
       proxyUpstreamUpgrade(req, socket, head);
       return;
     }
 
-    writeUpgradeFailure(
-      socket,
-      404,
-      "Not Found",
-      { error: { message: "Not found", type: "invalid_request_error" } }
-    );
+    writeUpgradeFailure(socket, 404, "Not Found", {
+      error: { message: "Not found", type: "invalid_request_error" },
+    });
     return;
   }
 
   if (requiresBudgetPrecheck(path)) {
     const authHeader =
-      typeof req.headers.authorization === "string" ? req.headers.authorization : undefined;
+      typeof req.headers.authorization === "string"
+        ? req.headers.authorization
+        : undefined;
     const apiKey = extractApiKeyFromAuthHeader(authHeader);
     if (!apiKey) {
-      writeUpgradeFailure(
-        socket,
-        401,
-        "Unauthorized",
-        { error: { message: "Missing API key", type: "invalid_request_error" } }
-      );
+      writeUpgradeFailure(socket, 401, "Unauthorized", {
+        error: { message: "Missing API key", type: "invalid_request_error" },
+      });
+      return;
+    }
+
+    if (isBudgetBypassEnabled()) {
+      proxyUpstreamUpgrade(req, socket, head);
       return;
     }
 
@@ -752,36 +1273,30 @@ server.on("upgrade", (req, socket, head) => {
     let budget = getBudget(hash);
 
     if (!budget || !budget.enabled) {
-      writeUpgradeFailure(
-        socket,
-        429,
-        "Too Many Requests",
-        {
-          error: {
-            type: "usage_limit_reached",
-            message: "The usage limit has been reached",
-          },
-        }
-      );
+      writeUpgradeFailure(socket, 429, "Too Many Requests", {
+        error: {
+          type: "usage_limit_reached",
+          message: "The usage limit has been reached",
+        },
+      });
       return;
     }
 
     budget = autoAdvanceWeek(budget);
     const providerKey = providerKeyFromApiKey(apiKey);
-    const spent = getWeeklyCost(providerKey, budget.week_start_date, budget.next_reset_date);
+    const spent = getWeeklyCost(
+      providerKey,
+      budget.week_start_date,
+      budget.next_reset_date,
+    );
 
     if (spent >= budget.weekly_limit_usd) {
-      writeUpgradeFailure(
-        socket,
-        429,
-        "Too Many Requests",
-        {
-          error: {
-            type: "usage_limit_reached",
-            message: "The usage limit has been reached",
-          },
-        }
-      );
+      writeUpgradeFailure(socket, 429, "Too Many Requests", {
+        error: {
+          type: "usage_limit_reached",
+          message: "The usage limit has been reached",
+        },
+      });
       return;
     }
   }
@@ -791,7 +1306,8 @@ server.on("upgrade", (req, socket, head) => {
 
 server.listen(config.port, "0.0.0.0", () => {
   const address = server.address();
-  const port = typeof address === "object" && address ? address.port : config.port;
+  const port =
+    typeof address === "object" && address ? address.port : config.port;
   console.log(`[ccs-limit] listening on :${port}`);
   console.log(`[ccs-limit] upstream: ${config.upstreamUrl}`);
   console.log(`[ccs-limit] budget db: ${config.budgetDbPath}`);

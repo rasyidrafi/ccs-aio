@@ -131,6 +131,7 @@ export interface LimitsAccountRow {
   updatedAt: string | null
   fiveHour: LimitsQuotaWindow | null
   weekly: LimitsQuotaWindow | null
+  unusedResets: number | null
   additionalPools: LimitsAdditionalPool[]
   alert: LimitsAlert | null
   error: string | null
@@ -162,6 +163,14 @@ export interface BudgetRow {
   percentUsed: number
   isOverBudget: boolean
   daysUntilReset: number
+  bypassLimitEnabled: boolean
+}
+
+export interface BudgetWindow {
+  week_start_date: string
+  next_reset_date: string
+  daysUntilReset: number
+  bypass_limit_enabled: boolean
 }
 
 export interface ApiKeyEntry {

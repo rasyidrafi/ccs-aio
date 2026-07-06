@@ -1,9 +1,4 @@
-import {
-  Card,
-  CardContent,
-  CardFooter,
-  CardHeader,
-} from "@/components/ui/card"
+import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ThemeProvider } from "@/components/theme-provider"
 import { cn } from "@/lib/utils"
@@ -80,8 +75,8 @@ function LoadingBudgetsTable() {
   return (
     <div className="rounded-lg border border-border/70">
       <div className="border-b border-border/70 px-4 py-3">
-        <div className="grid min-w-[1000px] grid-cols-[44px_minmax(160px,1.5fr)_80px_100px_minmax(200px,1fr)_180px_80px_180px] gap-4">
-          {Array.from({ length: 8 }).map((_, index) => (
+        <div className="grid min-w-[820px] grid-cols-[44px_minmax(160px,1.5fr)_80px_100px_minmax(200px,1fr)_180px] gap-4">
+          {Array.from({ length: 6 }).map((_, index) => (
             <Skeleton key={index} className="h-4 w-full max-w-full" />
           ))}
         </div>
@@ -90,7 +85,7 @@ function LoadingBudgetsTable() {
         {Array.from({ length: 5 }).map((_, rowIndex) => (
           <div
             key={rowIndex}
-            className="grid min-w-[1000px] grid-cols-[44px_minmax(160px,1.5fr)_80px_100px_minmax(200px,1fr)_180px_80px_180px] gap-4 border-b border-border/70 px-4 py-4 last:border-b-0"
+            className="grid min-w-[820px] grid-cols-[44px_minmax(160px,1.5fr)_80px_100px_minmax(200px,1fr)_180px] gap-4 border-b border-border/70 px-4 py-4 last:border-b-0"
           >
             <Skeleton className="h-4 w-6 justify-self-center" />
             <div className="min-w-0 space-y-2">
@@ -107,8 +102,6 @@ function LoadingBudgetsTable() {
               <Skeleton className="h-2.5 w-full" />
               <Skeleton className="h-3 w-28" />
             </div>
-            <Skeleton className="h-4 w-32" />
-            <Skeleton className="h-4 w-10 justify-self-center" />
             <Skeleton className="h-4 w-32" />
           </div>
         ))}
@@ -138,10 +131,7 @@ export function BudgetsPageSkeleton() {
               <Skeleton className="h-4 w-72 max-w-full" />
             </div>
             <Card
-              className={cn(
-                TABLE_PANEL_HEIGHT,
-                "border-border/70 bg-card/95"
-              )}
+              className={cn(TABLE_PANEL_HEIGHT, "border-border/70 bg-card/95")}
             >
               <CardHeader>
                 <Skeleton className="h-4 w-32" />
