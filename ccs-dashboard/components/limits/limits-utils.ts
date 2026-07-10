@@ -46,16 +46,15 @@ const DAY_SECONDS = 24 * 60 * 60
 
 export interface WeeklyUsagePrediction {
   remainingPercent: number
-  paceBalancePercent: number
-  recommendedDailyPercent: number
-  recoveryPercent: number | null
-  recoverySeconds: number | null
-  recommendationHorizonSeconds: number
+  dayNumber: number
+  dailyAllowancePercent: number
+  dailyBalancePercent: number
 }
 
 export function getWeeklyUsagePrediction(
   usedPercent: number,
-  resetAfterSeconds: number | null
+  resetAfterSeconds: number | null,
+  now = new Date()
 ): WeeklyUsagePrediction | null {
   if (resetAfterSeconds === null) return null
 
@@ -64,33 +63,26 @@ export function getWeeklyUsagePrediction(
     0,
     Math.min(WEEKLY_WINDOW_SECONDS, resetAfterSeconds)
   )
-  const secondsElapsed = WEEKLY_WINDOW_SECONDS - secondsRemaining
-  const expectedUsedPercent =
-    (secondsElapsed / WEEKLY_WINDOW_SECONDS) * 100
-  const remainingPercent = Math.max(0, 100 - used)
-  const remainingDays = secondsRemaining / DAY_SECONDS
-  const recommendationHorizonSeconds = Math.min(
-    DAY_SECONDS,
-    secondsRemaining
+  const resetAt = new Date(now.getTime() + secondsRemaining * 1000)
+  const weekStartedAt = new Date(
+    resetAt.getTime() - WEEKLY_WINDOW_SECONDS * 1000
   )
-  const expectedAtHorizon =
-    ((secondsElapsed + recommendationHorizonSeconds) /
-      WEEKLY_WINDOW_SECONDS) *
-    100
-  const recoveryPercent = Math.max(0, expectedAtHorizon - used)
-  const recoverySeconds =
-    used > expectedUsedPercent
-      ? ((used - expectedUsedPercent) / 100) * WEEKLY_WINDOW_SECONDS
-      : null
+  const currentDay = new Date(now)
+  currentDay.setHours(0, 0, 0, 0)
+  const weekStartDay = new Date(weekStartedAt)
+  weekStartDay.setHours(0, 0, 0, 0)
+  const elapsedCalendarDays = Math.floor(
+    (currentDay.getTime() - weekStartDay.getTime()) / (DAY_SECONDS * 1000)
+  )
+  const dayNumber = Math.max(1, Math.min(7, elapsedCalendarDays + 1))
+  const dailyAllowancePercent = (dayNumber / 7) * 100
+  const remainingPercent = Math.max(0, 100 - used)
 
   return {
     remainingPercent,
-    paceBalancePercent: expectedUsedPercent - used,
-    recommendedDailyPercent:
-      remainingDays > 0 ? remainingPercent / remainingDays : 0,
-    recoveryPercent,
-    recoverySeconds,
-    recommendationHorizonSeconds,
+    dayNumber,
+    dailyAllowancePercent,
+    dailyBalancePercent: dailyAllowancePercent - used,
   }
 }
 

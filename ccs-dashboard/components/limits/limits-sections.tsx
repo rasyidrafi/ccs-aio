@@ -156,9 +156,7 @@ function UsagePredictionCell({
   resetAfterSeconds: number | null
 }) {
   const prediction =
-    used === null
-      ? null
-      : getWeeklyUsagePrediction(used, resetAfterSeconds)
+    used === null ? null : getWeeklyUsagePrediction(used, resetAfterSeconds)
 
   if (!prediction) {
     return (
@@ -169,19 +167,16 @@ function UsagePredictionCell({
   }
 
   const isExhausted = prediction.remainingPercent <= 0
-  const isOverPace = prediction.paceBalancePercent < -0.005
-  const isUnderPace = prediction.paceBalancePercent > 0.005
-  const horizonLabel =
-    prediction.recommendationHorizonSeconds < 86_400
-      ? `until reset (${formatRelativeSeconds(prediction.recommendationHorizonSeconds)})`
-      : "next 24h"
+  const hasDailySurplus = prediction.dailyBalancePercent >= 0
 
   return (
     <div className="min-w-[190px] space-y-1 text-xs tabular-nums">
       <div
         className={cn(
           "font-medium",
-          isExhausted ? "text-destructive" : "text-emerald-700 dark:text-emerald-400"
+          isExhausted
+            ? "text-destructive"
+            : "text-emerald-700 dark:text-emerald-400"
         )}
       >
         {formatPredictionPercent(prediction.remainingPercent)}% remaining usage
@@ -189,26 +184,14 @@ function UsagePredictionCell({
       <div
         className={cn(
           "font-medium",
-          isOverPace
-            ? "text-destructive"
-            : isUnderPace
-              ? "text-emerald-700 dark:text-emerald-400"
-              : "text-muted-foreground"
+          hasDailySurplus
+            ? "text-emerald-700 dark:text-emerald-400"
+            : "text-destructive"
         )}
       >
-        {isOverPace
-          ? `-${formatPredictionPercent(prediction.paceBalancePercent)}% over pace`
-          : isUnderPace
-            ? `+${formatPredictionPercent(prediction.paceBalancePercent)}% usage buffer`
-            : "On pace"}
-      </div>
-      <div className="text-muted-foreground">
-        {isOverPace
-          ? prediction.recoveryPercent !== null &&
-            prediction.recoveryPercent > 0.005
-            ? `Use \u2264${formatPredictionPercent(prediction.recoveryPercent)}% ${horizonLabel} to recover`
-            : `Pause for ${formatRelativeSeconds(prediction.recoverySeconds)} to recover`
-          : `Recommended \u2264${formatPredictionPercent(prediction.recommendedDailyPercent)}%/day until reset`}
+        {hasDailySurplus
+          ? `${formatPredictionPercent(prediction.dailyBalancePercent)}% surplus (Day ${prediction.dayNumber} allowance ${formatPredictionPercent(prediction.dailyAllowancePercent)}%)`
+          : `${formatPredictionPercent(prediction.dailyBalancePercent)}% over (Day ${prediction.dayNumber} allowance ${formatPredictionPercent(prediction.dailyAllowancePercent)}%)`}
       </div>
     </div>
   )
