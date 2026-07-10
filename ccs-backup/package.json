@@ -10,6 +10,8 @@
     "status": "bun run src/cli.ts status",
     "backfill-old-data": "bun run src/cli.ts backfill-old-data",
     "rebuild-rollups": "bun run src/cli.ts rebuild-rollups",
+    "reprice": "bun run src/cli.ts reprice",
+    "test": "bun test",
     "install:systemd": "bash scripts/install-systemd.sh",
     "typecheck": "bunx tsc --noEmit"
   },

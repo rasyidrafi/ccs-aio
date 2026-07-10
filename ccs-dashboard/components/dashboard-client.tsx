@@ -161,9 +161,21 @@ export function DashboardClient({
                 refreshing={isRefreshing}
               />
               <SummaryCard
-                title="Estimated cost"
+                title="API-equivalent cost"
                 value={formatCost(dashboard.summary.totalCost)}
-                detail="Provider-aware spend estimate."
+                detail={
+                  dashboard.summary.fallbackCostRequests > 0 ||
+                  dashboard.summary.unsupportedCostRequests > 0
+                    ? `${formatNumber(
+                        dashboard.summary.fallbackCostRequests +
+                          dashboard.summary.unsupportedCostRequests
+                      )} requests use fallback or unsupported pricing.`
+                    : dashboard.summary.assumedCostRequests > 0
+                      ? `${formatNumber(
+                          dashboard.summary.assumedCostRequests
+                        )} requests use inferred provider or Standard tier.`
+                      : "Calculated from provider, tier, cache, and context-aware rates."
+                }
                 icon={Wallet}
                 refreshing={isRefreshing}
               />

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { calculatePricing } from '@/pricing';
 import type { SourceKind, UsageEventRecord } from '@/types';
 
 interface SnapshotDetail {
@@ -9,6 +10,7 @@ interface SnapshotDetail {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  cacheCreationTokens?: number;
   requestCount?: number;
   cost?: number;
   failed?: boolean;
@@ -29,6 +31,7 @@ interface LiveUsageResponse {
                 input_tokens?: number;
                 output_tokens?: number;
                 cached_tokens?: number;
+                cache_creation_tokens?: number;
               };
             }>;
           }
@@ -44,42 +47,19 @@ interface UsageQueueRecord {
   model?: unknown;
   alias?: unknown;
   api_key?: unknown;
+  executor_type?: unknown;
+  endpoint?: unknown;
+  request_id?: unknown;
+  service_tier?: unknown;
   tokens?: {
     input_tokens?: unknown;
     output_tokens?: unknown;
     cached_tokens?: unknown;
+    cache_read_tokens?: unknown;
+    cache_creation_tokens?: unknown;
   } | null;
   failed?: unknown;
 }
-
-const PRICING: Record<
-  string,
-  { inputPerMillion: number; outputPerMillion: number; cacheReadPerMillion: number }
-> = {
-  'claude-sonnet-4-6': { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheReadPerMillion: 0.3 },
-  'claude-sonnet-4-6-thinking': { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheReadPerMillion: 0.3 },
-  'claude-sonnet-4-5': { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheReadPerMillion: 0.3 },
-  'claude-opus-4-6': { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheReadPerMillion: 0.5 },
-  'gpt-5': { inputPerMillion: 1.25, outputPerMillion: 10.0, cacheReadPerMillion: 0.125 },
-  'gpt-5-codex': { inputPerMillion: 1.25, outputPerMillion: 10.0, cacheReadPerMillion: 0.125 },
-  'gpt-5.2': { inputPerMillion: 1.25, outputPerMillion: 10.0, cacheReadPerMillion: 0.125 },
-  'gpt-5.3-codex': { inputPerMillion: 1.25, outputPerMillion: 10.0, cacheReadPerMillion: 0.125 },
-  'gpt-5.4': { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheReadPerMillion: 0.3 },
-  'gpt-5.4-mini': { inputPerMillion: 3.0, outputPerMillion: 15.0, cacheReadPerMillion: 0.3 },
-  'gpt-5.5': { inputPerMillion: 5.0, outputPerMillion: 25.0, cacheReadPerMillion: 0.5 },
-  'gemini-2.5-pro': { inputPerMillion: 1.25, outputPerMillion: 10.0, cacheReadPerMillion: 0.3125 },
-  'gemini-2.5-flash': { inputPerMillion: 0.3, outputPerMillion: 2.5, cacheReadPerMillion: 0.075 },
-  'gemini-2.5-flash-lite': { inputPerMillion: 0.1, outputPerMillion: 0.4, cacheReadPerMillion: 0.025 },
-  'gemini-3-pro-preview': { inputPerMillion: 2.0, outputPerMillion: 12.0, cacheReadPerMillion: 0.0 },
-  'gemini-3-flash-preview': { inputPerMillion: 0.3, outputPerMillion: 2.5, cacheReadPerMillion: 0.075 },
-};
-
-const PRICING_ALIASES: Record<string, string> = {
-  'gemini-3.1-pro-preview': 'gemini-3-pro-preview',
-  'gemini-3.1-flash-preview': 'gemini-3-flash-preview',
-  'gemini-3-1-pro-preview': 'gemini-3-pro-preview',
-  'gemini-3-1-flash-preview': 'gemini-3-flash-preview',
-};
 
 function toNumber(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value);
@@ -108,20 +88,6 @@ function queueRecordProviderKey(record: UsageQueueRecord): string {
   return '';
 }
 
-function calculateCost(model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number): number {
-  const pricingKey = PRICING_ALIASES[model] ?? model;
-  const pricing = PRICING[pricingKey] ?? {
-    inputPerMillion: 3.0,
-    outputPerMillion: 15.0,
-    cacheReadPerMillion: 0.3,
-  };
-  return (
-    (inputTokens / 1_000_000) * pricing.inputPerMillion +
-    (outputTokens / 1_000_000) * pricing.outputPerMillion +
-    (cacheReadTokens / 1_000_000) * pricing.cacheReadPerMillion
-  );
-}
-
 export function buildEventKey(event: Omit<UsageEventRecord, 'eventKey'>): string {
   return [
     event.providerKey,
@@ -138,13 +104,18 @@ export function buildEventKey(event: Omit<UsageEventRecord, 'eventKey'>): string
 function normalizeBase(
   source: SourceKind,
   providerKey: string,
+  provider: string,
+  serviceTier: string,
+  endpoint: string,
+  requestId: string,
   model: string,
   timestamp: string,
   inputTokens: number,
   outputTokens: number,
   cacheReadTokens: number,
+  cacheCreationTokens: number,
   requestCount: number,
-  cost: number,
+  sourceCost: number,
   failed: boolean
 ): UsageEventRecord | null {
   const timestampMs = Date.parse(timestamp);
@@ -152,16 +123,40 @@ function normalizeBase(
     return null;
   }
 
+  const pricing = calculatePricing({
+    model,
+    provider,
+    serviceTier,
+    inputTokens,
+    outputTokens,
+    cachedInputTokens: cacheReadTokens,
+    cacheCreationTokens,
+    sourceCost,
+  });
   const event: Omit<UsageEventRecord, 'eventKey'> = {
     providerKey,
+    provider: pricing.provider,
+    serviceTier: pricing.serviceTier,
+    endpoint,
+    requestId,
     model,
     timestamp,
     timestampMs,
     inputTokens: Math.max(0, Math.trunc(inputTokens)),
     outputTokens: Math.max(0, Math.trunc(outputTokens)),
     cacheReadTokens: Math.max(0, Math.trunc(cacheReadTokens)),
+    cacheCreationTokens: Math.max(0, Math.trunc(cacheCreationTokens)),
+    uncachedInputTokens: pricing.uncachedInputTokens,
     requestCount: Math.max(1, Math.trunc(requestCount)),
-    cost: Number.isFinite(cost) ? cost : 0,
+    sourceCost: Number.isFinite(sourceCost) ? sourceCost : 0,
+    inputCost: pricing.inputCost,
+    cachedInputCost: pricing.cachedInputCost,
+    cacheCreationCost: pricing.cacheCreationCost,
+    outputCost: pricing.outputCost,
+    cost: pricing.cost,
+    pricingVersion: pricing.pricingVersion,
+    pricingConfidence: pricing.pricingConfidence,
+    pricingContextTier: pricing.pricingContextTier,
     failed,
     liveSeen: source === 'live',
     snapshotSeen: source === 'snapshot',
@@ -179,21 +174,24 @@ export function normalizeSnapshotDetails(details: SnapshotDetail[]): UsageEventR
     const inputTokens = toNumber(detail.inputTokens);
     const outputTokens = toNumber(detail.outputTokens);
     const cacheReadTokens = toNumber(detail.cacheReadTokens);
+    const cacheCreationTokens = toNumber(detail.cacheCreationTokens);
     const requestCount = toNumber(detail.requestCount) || 1;
-    const cost =
-      typeof detail.cost === 'number'
-        ? detail.cost
-        : calculateCost(model, inputTokens, outputTokens, cacheReadTokens);
+    const sourceCost = typeof detail.cost === 'number' ? detail.cost : 0;
     const event = normalizeBase(
       'snapshot',
       providerKey,
+      '',
+      '',
+      '',
+      '',
       model,
       timestamp,
       inputTokens,
       outputTokens,
       cacheReadTokens,
+      cacheCreationTokens,
       requestCount,
-      cost,
+      sourceCost,
       detail.failed === true
     );
     if (event) events.push(event);
@@ -209,16 +207,22 @@ export function normalizeLiveResponse(payload: LiveUsageResponse): UsageEventRec
         const inputTokens = toNumber(detail.tokens?.input_tokens);
         const outputTokens = toNumber(detail.tokens?.output_tokens);
         const cacheReadTokens = toNumber(detail.tokens?.cached_tokens);
+        const cacheCreationTokens = toNumber(detail.tokens?.cache_creation_tokens);
         const event = normalizeBase(
           'live',
           providerKey,
+          '',
+          '',
+          '',
+          '',
           model,
           typeof detail.timestamp === 'string' ? detail.timestamp : '',
           inputTokens,
           outputTokens,
           cacheReadTokens,
+          cacheCreationTokens,
           1,
-          calculateCost(model, inputTokens, outputTokens, cacheReadTokens),
+          0,
           detail.failed === true
         );
         if (event) events.push(event);
@@ -249,17 +253,23 @@ export function normalizeUsageQueueResponse(records: unknown[]): UsageEventRecor
     const inputTokens = toNumber(record.tokens?.input_tokens);
     const outputTokens = toNumber(record.tokens?.output_tokens);
     const cacheReadTokens = toNumber(record.tokens?.cached_tokens);
+    const cacheCreationTokens = toNumber(record.tokens?.cache_creation_tokens);
 
     const event = normalizeBase(
       'live',
       providerKey,
+      toTrimmedString(record.provider) || toTrimmedString(record.executor_type),
+      toTrimmedString(record.service_tier),
+      toTrimmedString(record.endpoint),
+      toTrimmedString(record.request_id),
       model,
       timestamp,
       inputTokens,
       outputTokens,
-      cacheReadTokens,
+      cacheReadTokens || toNumber(record.tokens?.cache_read_tokens),
+      cacheCreationTokens,
       1,
-      calculateCost(model, inputTokens, outputTokens, cacheReadTokens),
+      0,
       record.failed === true
     );
     if (event) {
@@ -277,6 +287,28 @@ export function mergeEvents(events: UsageEventRecord[]): UsageEventRecord[] {
     if (existing) {
       existing.liveSeen ||= event.liveSeen;
       existing.snapshotSeen ||= event.snapshotSeen;
+      if (
+        existing.sourceCost === 0 &&
+        event.sourceCost > 0 &&
+        (existing.pricingConfidence === 'fallback' || existing.pricingConfidence === 'unsupported')
+      ) {
+        const pricing = calculatePricing({
+          model: existing.model,
+          provider: existing.provider,
+          serviceTier: existing.serviceTier,
+          inputTokens: existing.inputTokens,
+          outputTokens: existing.outputTokens,
+          cachedInputTokens: existing.cacheReadTokens,
+          cacheCreationTokens: existing.cacheCreationTokens,
+          sourceCost: event.sourceCost,
+        });
+        existing.sourceCost = event.sourceCost;
+        existing.inputCost = pricing.inputCost;
+        existing.cachedInputCost = pricing.cachedInputCost;
+        existing.cacheCreationCost = pricing.cacheCreationCost;
+        existing.outputCost = pricing.outputCost;
+        existing.cost = pricing.cost;
+      }
       continue;
     }
     merged.set(event.eventKey, { ...event });

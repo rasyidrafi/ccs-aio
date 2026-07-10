@@ -18,7 +18,7 @@ import type {
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_PORT = 8097
-const SERVING_SCHEMA_VERSION = "2"
+const SERVING_SCHEMA_VERSION = "3"
 
 interface DashboardWindow {
   label: string
@@ -54,6 +54,15 @@ interface ModelSummaryRow {
   requests: number
   tokens: number
   cost: number
+}
+
+interface PricingQualityRow {
+  pricing_version: string | null
+  exact_requests: number
+  assumed_requests: number
+  fallback_requests: number
+  unsupported_requests: number
+  long_context_requests: number
 }
 
 interface ApiKeyNameCacheEntry {
@@ -562,6 +571,12 @@ function emptyPayload(
       totalTokens: 0,
       totalCost: 0,
       activeKeys: 0,
+      pricingVersion: null,
+      exactCostRequests: 0,
+      assumedCostRequests: 0,
+      fallbackCostRequests: 0,
+      unsupportedCostRequests: 0,
+      longContextRequests: 0,
     },
     source: {
       mode: "fallback",
@@ -666,6 +681,20 @@ export async function getDashboardPayload(
       )
       .all(rangeFromBucket, rangeToBucket) as unknown as ModelSummaryRow[]
 
+    const pricingQuality = db
+      .prepare(
+        `SELECT
+          MAX(NULLIF(pricing_version, '')) as pricing_version,
+          COALESCE(SUM(CASE WHEN pricing_confidence = 'exact' THEN request_count ELSE 0 END), 0) as exact_requests,
+          COALESCE(SUM(CASE WHEN pricing_confidence IN ('standard-assumed', 'provider-assumed') THEN request_count ELSE 0 END), 0) as assumed_requests,
+          COALESCE(SUM(CASE WHEN pricing_confidence = 'fallback' THEN request_count ELSE 0 END), 0) as fallback_requests,
+          COALESCE(SUM(CASE WHEN pricing_confidence = 'unsupported' THEN request_count ELSE 0 END), 0) as unsupported_requests,
+          COALESCE(SUM(CASE WHEN pricing_context_tier = 'long' THEN request_count ELSE 0 END), 0) as long_context_requests
+        FROM raw_usage_events
+        WHERE timestamp_ms >= ? AND timestamp_ms <= ?`
+      )
+      .get(range.from.getTime(), range.to.getTime()) as PricingQualityRow | undefined
+
     const trendBucketBounds = resolveTrendBucketBounds(
       query,
       resolvedGranularity,
@@ -759,6 +788,12 @@ export async function getDashboardPayload(
         totalTokens,
         totalCost,
         activeKeys: keys.length,
+        pricingVersion: pricingQuality?.pricing_version ?? null,
+        exactCostRequests: pricingQuality?.exact_requests ?? 0,
+        assumedCostRequests: pricingQuality?.assumed_requests ?? 0,
+        fallbackCostRequests: pricingQuality?.fallback_requests ?? 0,
+        unsupportedCostRequests: pricingQuality?.unsupported_requests ?? 0,
+        longContextRequests: pricingQuality?.long_context_requests ?? 0,
       },
       source: {
         mode,

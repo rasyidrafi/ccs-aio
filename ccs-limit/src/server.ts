@@ -13,6 +13,7 @@ import {
   getBudget,
   getAllBudgets,
   getBudgetWindow,
+  getActiveBudgetBypassSession,
   isBudgetBypassEnabled,
   setBudgetBypassEnabled,
   setBudgetWindow,
@@ -26,7 +27,10 @@ import {
   todayDate,
   addDays,
 } from "./db";
-import { getWeeklyCost } from "./usage";
+import {
+  getCostForDateWindow,
+  getCostForTimestampWindow,
+} from "./usage";
 import { resolveApiKeys } from "./api-keys";
 import { ok, fail, extractBearerToken, CORS_HEADERS } from "./response";
 
@@ -34,6 +38,69 @@ type NodeHandler = (
   req: http.IncomingMessage,
   res: http.ServerResponse,
 ) => Promise<void>;
+
+function datePart(timestamp: string): string {
+  return timestamp.slice(0, 10);
+}
+
+function resolveBudgetUsageWindow(
+  weekStartDate: string,
+  nextResetDate: string,
+  bypassLimitEnabled: boolean,
+): {
+  usageStartDate: string;
+  usageEndDate: string;
+  costStartInclusive: string;
+  costEndExclusive: string;
+  useExactTimestamps: boolean;
+  bypassSessionStartedAt: string | null;
+  bypassSessionEndedAt: string | null;
+} {
+  const activeSession = bypassLimitEnabled ? getActiveBudgetBypassSession() : null;
+  if (activeSession) {
+    const usageEndDate = activeSession.ended_at
+      ? datePart(activeSession.ended_at)
+      : todayDate();
+    return {
+      usageStartDate: datePart(activeSession.started_at),
+      usageEndDate,
+      costStartInclusive: activeSession.started_at,
+      costEndExclusive: activeSession.ended_at ?? addDays(usageEndDate, 1),
+      useExactTimestamps: true,
+      bypassSessionStartedAt: activeSession.started_at,
+      bypassSessionEndedAt: activeSession.ended_at,
+    };
+  }
+
+  return {
+    usageStartDate: weekStartDate,
+    usageEndDate: nextResetDate,
+    costStartInclusive: weekStartDate,
+    costEndExclusive: nextResetDate,
+    useExactTimestamps: false,
+    bypassSessionStartedAt: null,
+    bypassSessionEndedAt: null,
+  };
+}
+
+function getBudgetUsageCost(
+  providerKey: string,
+  usageWindow: ReturnType<typeof resolveBudgetUsageWindow>,
+): number {
+  if (usageWindow.useExactTimestamps) {
+    return getCostForTimestampWindow(
+      providerKey,
+      usageWindow.costStartInclusive,
+      usageWindow.costEndExclusive,
+    );
+  }
+
+  return getCostForDateWindow(
+    providerKey,
+    usageWindow.costStartInclusive,
+    usageWindow.costEndExclusive,
+  );
+}
 
 const HOP_BY_HOP_REQUEST_HEADERS = new Set([
   "connection",
@@ -57,6 +124,19 @@ const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
 ]);
 const CODEX_BACKEND_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_USER_AGENT = "codex-cli";
+
+const httpAgent = new http.Agent({
+  keepAlive: true,
+  maxSockets: 256,
+  maxFreeSockets: 32,
+  timeout: config.upstreamIdleTimeoutMs,
+});
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 256,
+  maxFreeSockets: 32,
+  timeout: config.upstreamIdleTimeoutMs,
+});
 
 type CodexAuthFile = {
   access_token?: string;
@@ -481,11 +561,12 @@ async function handleListBudgets(): Promise<Response> {
     budgets.map(async (b) => {
       const b2 = autoAdvanceWeek(b);
       const providerKey = `api-key:${b2.api_key_hash}`;
-      const spent = getWeeklyCost(
-        providerKey,
+      const usageWindow = resolveBudgetUsageWindow(
         b2.week_start_date,
         b2.next_reset_date,
+        bypassLimitEnabled,
       );
+      const spent = getBudgetUsageCost(providerKey, usageWindow);
       const matched = allKeys.find((k) => k.hash === b2.api_key_hash);
       return {
         ...b2,
@@ -504,6 +585,10 @@ async function handleListBudgets(): Promise<Response> {
           ),
         ),
         bypassLimitEnabled,
+        usageStartDate: usageWindow.usageStartDate,
+        usageEndDate: usageWindow.usageEndDate,
+        bypassSessionStartedAt: usageWindow.bypassSessionStartedAt,
+        bypassSessionEndedAt: usageWindow.bypassSessionEndedAt,
       };
     }),
   );
@@ -518,11 +603,12 @@ async function handleGetBudget(hash: string): Promise<Response> {
   const bypassLimitEnabled = isBudgetBypassEnabled();
 
   const providerKey = `api-key:${budget.api_key_hash}`;
-  const spent = getWeeklyCost(
-    providerKey,
+  const usageWindow = resolveBudgetUsageWindow(
     budget.week_start_date,
     budget.next_reset_date,
+    bypassLimitEnabled,
   );
+  const spent = getBudgetUsageCost(providerKey, usageWindow);
   const allKeys = await resolveApiKeys();
   const matched = allKeys.find((k) => k.hash === budget.api_key_hash);
 
@@ -543,6 +629,10 @@ async function handleGetBudget(hash: string): Promise<Response> {
       ),
     ),
     bypassLimitEnabled,
+    usageStartDate: usageWindow.usageStartDate,
+    usageEndDate: usageWindow.usageEndDate,
+    bypassSessionStartedAt: usageWindow.bypassSessionStartedAt,
+    bypassSessionEndedAt: usageWindow.bypassSessionEndedAt,
   });
 }
 
@@ -575,6 +665,9 @@ async function handleGetBudgetWindow(): Promise<Response> {
 
   return ok({
     ...window,
+    bypass_session_started_at:
+      getActiveBudgetBypassSession()?.started_at ?? null,
+    bypass_session_ended_at: null,
     daysUntilReset: Math.max(
       0,
       Math.ceil(
@@ -625,7 +718,9 @@ async function handleUpdateBudgetBypass(req: Request): Promise<Response> {
 
   const enabled = setBudgetBypassEnabled(body.enabled);
   return ok({
-    enabled,
+    enabled: enabled.enabled,
+    bypassSessionStartedAt: enabled.activeSession?.started_at ?? null,
+    bypassSessionEndedAt: enabled.activeSession?.ended_at ?? null,
   });
 }
 
@@ -771,8 +866,32 @@ async function proxyUpstreamHttp(
 ): Promise<void> {
   const target = new URL(req.url || "/", config.upstreamUrl);
   const transport = target.protocol === "https:" ? https : http;
+  const agent = target.protocol === "https:" ? httpsAgent : httpAgent;
 
   await new Promise<void>((resolve) => {
+    let settled = false;
+    let upstreamRes: http.IncomingMessage | null = null;
+
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      req.off("aborted", abortProxy);
+      res.off("close", handleClientClose);
+      resolve();
+    };
+
+    const abortProxy = () => {
+      upstreamReq.destroy();
+      upstreamRes?.destroy();
+      settle();
+    };
+
+    const handleClientClose = () => {
+      if (!res.writableFinished) {
+        abortProxy();
+      }
+    };
+
     const upstreamReq = transport.request(
       {
         protocol: target.protocol,
@@ -781,9 +900,11 @@ async function proxyUpstreamHttp(
         method: req.method,
         path: `${target.pathname}${target.search}`,
         headers: cloneProxyHeaders(req.headers, target, false),
+        agent,
       },
-      (upstreamRes) => {
-        for (const [key, value] of Object.entries(upstreamRes.headers)) {
+      (response) => {
+        upstreamRes = response;
+        for (const [key, value] of Object.entries(response.headers)) {
           if (
             value === undefined ||
             HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())
@@ -793,10 +914,19 @@ async function proxyUpstreamHttp(
           res.setHeader(key, value);
         }
 
-        res.writeHead(upstreamRes.statusCode || 502, upstreamRes.statusMessage);
-        pipeline(upstreamRes, res, () => resolve());
+        res.writeHead(response.statusCode || 502, response.statusMessage);
+        pipeline(response, res, (error) => {
+          if (error && !res.destroyed) {
+            res.destroy(error);
+          }
+          settle();
+        });
       },
     );
+
+    upstreamReq.setTimeout(config.upstreamIdleTimeoutMs, () => {
+      upstreamReq.destroy(new Error("Upstream connection timed out"));
+    });
 
     upstreamReq.on("error", (err) => {
       if (!res.headersSent) {
@@ -813,12 +943,17 @@ async function proxyUpstreamHttp(
       } else {
         res.destroy(err);
       }
-      resolve();
+      upstreamRes?.destroy();
+      settle();
     });
 
-    req.on("aborted", () => upstreamReq.destroy());
-    res.on("close", () => upstreamReq.destroy());
-    pipeline(req, upstreamReq, () => {});
+    req.once("aborted", abortProxy);
+    res.once("close", handleClientClose);
+    pipeline(req, upstreamReq, (error) => {
+      if (error && !upstreamReq.destroyed) {
+        upstreamReq.destroy(error);
+      }
+    });
   });
 }
 
@@ -829,6 +964,7 @@ function proxyUpstreamUpgrade(
 ): void {
   const target = new URL(req.url || "/", config.upstreamUrl);
   const transport = target.protocol === "https:" ? https : http;
+  const agent = target.protocol === "https:" ? httpsAgent : httpAgent;
 
   const upstreamReq = transport.request({
     protocol: target.protocol,
@@ -837,7 +973,14 @@ function proxyUpstreamUpgrade(
     method: req.method,
     path: `${target.pathname}${target.search}`,
     headers: cloneProxyHeaders(req.headers, target, true),
+    agent,
   });
+
+  upstreamReq.setTimeout(config.upstreamIdleTimeoutMs, () => {
+    upstreamReq.destroy(new Error("Upstream upgrade timed out"));
+  });
+
+  socket.once("close", () => upstreamReq.destroy());
 
   const closeSockets = () => {
     if (!socket.destroyed) {
@@ -1001,7 +1144,7 @@ async function handleForward(
 
   budget = autoAdvanceWeek(budget);
   const providerKey = providerKeyFromApiKey(apiKey);
-  const spent = getWeeklyCost(
+  const spent = getCostForDateWindow(
     providerKey,
     budget.week_start_date,
     budget.next_reset_date,
@@ -1178,6 +1321,13 @@ const server = http.createServer((req, res) => {
   });
 });
 
+server.headersTimeout = config.headersTimeoutMs;
+server.keepAliveTimeout = config.keepAliveTimeoutMs;
+server.requestTimeout = 0;
+server.maxHeadersCount = 200;
+server.maxRequestsPerSocket = 1_000;
+server.setTimeout(config.clientIdleTimeoutMs, (socket) => socket.destroy());
+
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(
     req.url || "/",
@@ -1224,7 +1374,7 @@ server.on("upgrade", (req, socket, head) => {
 
         budget = autoAdvanceWeek(budget);
         const providerKey = providerKeyFromApiKey(apiKey);
-        const spent = getWeeklyCost(
+        const spent = getCostForDateWindow(
           providerKey,
           budget.week_start_date,
           budget.next_reset_date,
@@ -1284,7 +1434,7 @@ server.on("upgrade", (req, socket, head) => {
 
     budget = autoAdvanceWeek(budget);
     const providerKey = providerKeyFromApiKey(apiKey);
-    const spent = getWeeklyCost(
+    const spent = getCostForDateWindow(
       providerKey,
       budget.week_start_date,
       budget.next_reset_date,

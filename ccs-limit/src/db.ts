@@ -37,6 +37,18 @@ export function getBudgetDb(): Database {
     )
   `);
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS budget_bypass_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  backfillActiveBudgetBypassSession(db);
+
   return db;
 }
 
@@ -44,6 +56,14 @@ export interface BudgetWindow {
   week_start_date: string;
   next_reset_date: string;
   bypass_limit_enabled: boolean;
+  bypass_session_started_at: string | null;
+  bypass_session_ended_at: string | null;
+}
+
+export interface BudgetBypassSession {
+  id: number | null;
+  started_at: string;
+  ended_at: string | null;
 }
 
 export interface BudgetRow {
@@ -56,11 +76,38 @@ export interface BudgetRow {
   updated_at: string;
 }
 
-function readSetting(d: Database, key: string): string | null {
+function backfillActiveBudgetBypassSession(d: Database): void {
+  const setting = d
+    .query(
+      "SELECT value, updated_at FROM budget_settings WHERE key = 'bypass_limit_enabled'",
+    )
+    .get() as { value: string; updated_at: string } | null;
+  if (setting?.value !== "true") return;
+
+  const active = d
+    .query(
+      "SELECT id FROM budget_bypass_sessions WHERE ended_at IS NULL LIMIT 1",
+    )
+    .get() as { id: number } | null;
+  if (active) return;
+
+  d.run("INSERT INTO budget_bypass_sessions (started_at) VALUES (?)", [
+    setting.updated_at,
+  ]);
+}
+
+function readSettingRow(
+  d: Database,
+  key: string,
+): { value: string; updated_at: string } | null {
   const row = d
-    .query("SELECT value FROM budget_settings WHERE key = ?")
-    .get(key) as { value: string } | null;
-  return row?.value ?? null;
+    .query("SELECT value, updated_at FROM budget_settings WHERE key = ?")
+    .get(key) as { value: string; updated_at: string } | null;
+  return row;
+}
+
+function readSetting(d: Database, key: string): string | null {
+  return readSettingRow(d, key)?.value ?? null;
 }
 
 function writeSetting(d: Database, key: string, value: string): void {
@@ -87,6 +134,8 @@ function readBudgetWindow(d: Database): BudgetWindow | null {
     week_start_date: weekStart,
     next_reset_date: nextReset,
     bypass_limit_enabled: readBudgetBypassEnabled(d),
+    bypass_session_started_at: readActiveBudgetBypassSession(d)?.started_at ?? null,
+    bypass_session_ended_at: null,
   };
 }
 
@@ -99,17 +148,86 @@ function readBudgetBypassEnabled(d: Database): boolean {
   return readSetting(d, "bypass_limit_enabled") === "true";
 }
 
+function readActiveBudgetBypassSession(d: Database): BudgetBypassSession | null {
+  const active = d
+    .query(
+      `SELECT id, started_at, ended_at
+       FROM budget_bypass_sessions
+       WHERE ended_at IS NULL
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .get() as BudgetBypassSession | null;
+
+  if (active) return active;
+
+  const bypassSetting = readSettingRow(d, "bypass_limit_enabled");
+  if (bypassSetting?.value === "true") {
+    return {
+      id: null,
+      started_at: bypassSetting.updated_at,
+      ended_at: null,
+    };
+  }
+
+  return null;
+}
+
 export function isBudgetBypassEnabled(): boolean {
   return readBudgetBypassEnabled(getBudgetDb());
 }
 
-export function setBudgetBypassEnabled(enabled: boolean): boolean {
-  writeSetting(
-    getBudgetDb(),
-    "bypass_limit_enabled",
-    enabled ? "true" : "false",
-  );
-  return enabled;
+export function getActiveBudgetBypassSession(): BudgetBypassSession | null {
+  return readActiveBudgetBypassSession(getBudgetDb());
+}
+
+export function setBudgetBypassEnabled(
+  enabled: boolean,
+): { enabled: boolean; activeSession: BudgetBypassSession | null } {
+  const d = getBudgetDb();
+  const currentEnabled = readBudgetBypassEnabled(d);
+  const activeSession = readActiveBudgetBypassSession(d);
+
+  if (enabled && activeSession?.id === null) {
+    d.run(
+      `INSERT INTO budget_bypass_sessions (started_at)
+       VALUES (?)`,
+      [activeSession.started_at],
+    );
+  } else if (enabled && !activeSession) {
+    d.run(
+      `INSERT INTO budget_bypass_sessions (started_at)
+       VALUES (datetime('now'))`,
+    );
+  }
+
+  if (!enabled && activeSession) {
+    if (activeSession.id === null) {
+      d.run(
+        `INSERT INTO budget_bypass_sessions (started_at, ended_at)
+         VALUES (?, datetime('now'))`,
+        [activeSession.started_at],
+      );
+    } else {
+      d.run(
+        `UPDATE budget_bypass_sessions
+         SET ended_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ? AND ended_at IS NULL`,
+        [activeSession.id],
+      );
+    }
+  }
+
+  if (enabled !== currentEnabled) {
+    writeSetting(
+      d,
+      "bypass_limit_enabled",
+      enabled ? "true" : "false",
+    );
+  }
+
+  const nextActiveSession = enabled ? readActiveBudgetBypassSession(d) : null;
+  return { enabled, activeSession: nextActiveSession };
 }
 
 function syncBudgetsToWindow(d: Database, window: BudgetWindow): void {
@@ -140,6 +258,8 @@ export function getBudgetWindow(): BudgetWindow {
       week_start_date: todayDate(),
       next_reset_date: addDays(todayDate(), 7),
       bypass_limit_enabled: readBudgetBypassEnabled(d),
+      bypass_session_started_at: readActiveBudgetBypassSession(d)?.started_at ?? null,
+      bypass_session_ended_at: null,
     };
     writeBudgetWindow(d, window);
   }
@@ -156,6 +276,8 @@ export function getBudgetWindow(): BudgetWindow {
     week_start_date: weekStart,
     next_reset_date: nextReset,
     bypass_limit_enabled: readBudgetBypassEnabled(d),
+    bypass_session_started_at: readActiveBudgetBypassSession(d)?.started_at ?? null,
+    bypass_session_ended_at: null,
   };
   if (
     advanced.week_start_date !== window.week_start_date ||
@@ -177,6 +299,8 @@ export function setBudgetWindow(
     week_start_date: weekStartDate,
     next_reset_date: nextResetDate,
     bypass_limit_enabled: readBudgetBypassEnabled(d),
+    bypass_session_started_at: readActiveBudgetBypassSession(d)?.started_at ?? null,
+    bypass_session_ended_at: null,
   };
   writeBudgetWindow(d, window);
   syncBudgetsToWindow(d, window);
@@ -297,7 +421,11 @@ export function autoAdvanceWeek(budget: BudgetRow): BudgetRow {
 }
 
 export function todayDate(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 export function addDays(dateStr: string, days: number): string {

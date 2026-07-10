@@ -80,6 +80,12 @@ export interface DashboardPayload {
     totalTokens: number
     totalCost: number
     activeKeys: number
+    pricingVersion: string | null
+    exactCostRequests: number
+    assumedCostRequests: number
+    fallbackCostRequests: number
+    unsupportedCostRequests: number
+    longContextRequests: number
   }
   source: {
     mode: "live" | "fallback" | "mixed"
@@ -164,6 +170,10 @@ export interface BudgetRow {
   isOverBudget: boolean
   daysUntilReset: number
   bypassLimitEnabled: boolean
+  usageStartDate: string
+  usageEndDate: string
+  bypassSessionStartedAt: string | null
+  bypassSessionEndedAt: string | null
 }
 
 export interface BudgetWindow {
@@ -171,6 +181,8 @@ export interface BudgetWindow {
   next_reset_date: string
   daysUntilReset: number
   bypass_limit_enabled: boolean
+  bypass_session_started_at: string | null
+  bypass_session_ended_at: string | null
 }
 
 export interface ApiKeyEntry {

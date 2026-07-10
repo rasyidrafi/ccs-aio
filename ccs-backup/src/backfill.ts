@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { Database as BunDatabase } from 'bun:sqlite';
 import { openDatabase, persistEvents } from '@/db';
 import { resolveConfig } from '@/config';
+import { calculatePricing } from '@/pricing';
 import type { UsageEventRecord } from '@/types';
 
 interface OldUsageRow {
@@ -45,17 +46,39 @@ function resolveSourceDbPath(sourceDir?: string): string {
 }
 
 function toUsageEventRecord(row: OldUsageRow): UsageEventRecord {
+  const pricing = calculatePricing({
+    model: row.model,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cachedInputTokens: row.cache_read_tokens,
+    cacheCreationTokens: 0,
+    sourceCost: row.cost,
+  });
   return {
     eventKey: row.event_key,
     providerKey: row.key_id,
+    provider: pricing.provider,
+    serviceTier: pricing.serviceTier,
+    endpoint: '',
+    requestId: '',
     model: row.model,
     timestamp: row.timestamp,
     timestampMs: row.timestamp_ms,
     inputTokens: row.input_tokens,
     outputTokens: row.output_tokens,
     cacheReadTokens: row.cache_read_tokens,
+    cacheCreationTokens: 0,
+    uncachedInputTokens: pricing.uncachedInputTokens,
     requestCount: row.request_count,
-    cost: row.cost,
+    sourceCost: row.cost,
+    inputCost: pricing.inputCost,
+    cachedInputCost: pricing.cachedInputCost,
+    cacheCreationCost: pricing.cacheCreationCost,
+    outputCost: pricing.outputCost,
+    cost: pricing.cost,
+    pricingVersion: pricing.pricingVersion,
+    pricingConfidence: pricing.pricingConfidence,
+    pricingContextTier: pricing.pricingContextTier,
     failed: row.failed === 1,
     liveSeen: row.source_state === 'live',
     snapshotSeen: row.source_state !== 'live',

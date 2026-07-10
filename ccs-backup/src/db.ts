@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { access, mkdir } from 'node:fs/promises';
 import { Database } from 'bun:sqlite';
+import { calculatePricing, PRICING_VERSION } from '@/pricing';
 import type { StatusSummary, SyncSummary, UsageEventRecord } from '@/types';
 
 interface ChangeRow {
@@ -24,6 +25,20 @@ interface RollupBoundsRow {
 interface ExistingEventRow {
   live_seen: number;
   snapshot_seen: number;
+  cost: number;
+}
+
+interface RepriceRow {
+  event_key: string;
+  provider: string;
+  service_tier: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  source_cost: number;
+  pricing_confidence: string;
 }
 
 interface RollupAggregate {
@@ -66,7 +81,7 @@ interface RollupTableColumnRow {
 type RollupGranularity = 'hourly' | 'daily' | 'monthly';
 type RollupTableName = 'rollup_hourly' | 'rollup_daily' | 'rollup_monthly';
 
-const ROLLUP_SCHEMA_VERSION = '2';
+const ROLLUP_SCHEMA_VERSION = '3';
 const ROLLUP_TABLES: RollupTableName[] = ['rollup_hourly', 'rollup_daily', 'rollup_monthly'];
 
 export interface RebuildRollupsSummary {
@@ -81,6 +96,11 @@ export interface RebuildRollupsSummary {
   };
 }
 
+export interface RepriceUsageSummary extends RebuildRollupsSummary {
+  pricingVersion: string;
+  repriced: number;
+}
+
 function createSchema(db: Database): void {
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -90,14 +110,28 @@ function createSchema(db: Database): void {
     CREATE TABLE IF NOT EXISTS raw_usage_events (
       event_key TEXT PRIMARY KEY,
       provider_key TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'unknown',
+      service_tier TEXT NOT NULL DEFAULT 'standard',
+      endpoint TEXT NOT NULL DEFAULT '',
+      request_id TEXT NOT NULL DEFAULT '',
       model TEXT NOT NULL,
       timestamp TEXT NOT NULL,
       timestamp_ms INTEGER NOT NULL,
       input_tokens INTEGER NOT NULL,
       output_tokens INTEGER NOT NULL,
       cache_read_tokens INTEGER NOT NULL,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
       request_count INTEGER NOT NULL,
+      source_cost REAL NOT NULL DEFAULT 0,
+      input_cost REAL NOT NULL DEFAULT 0,
+      cached_input_cost REAL NOT NULL DEFAULT 0,
+      cache_creation_cost REAL NOT NULL DEFAULT 0,
+      output_cost REAL NOT NULL DEFAULT 0,
       cost REAL NOT NULL,
+      pricing_version TEXT NOT NULL DEFAULT '',
+      pricing_confidence TEXT NOT NULL DEFAULT 'fallback',
+      pricing_context_tier TEXT NOT NULL DEFAULT 'standard',
       failed INTEGER NOT NULL DEFAULT 0,
       live_seen INTEGER NOT NULL DEFAULT 0,
       snapshot_seen INTEGER NOT NULL DEFAULT 0,
@@ -192,10 +226,41 @@ function ensureRollupColumns(db: Database, tableName: RollupTableName): void {
   }
 }
 
+function ensureRawUsageColumns(db: Database): void {
+  const columns = listTableColumns(db, 'raw_usage_events');
+  const additions: Array<[string, string]> = [
+    ['provider', "TEXT NOT NULL DEFAULT 'unknown'"],
+    ['service_tier', "TEXT NOT NULL DEFAULT 'standard'"],
+    ['endpoint', "TEXT NOT NULL DEFAULT ''"],
+    ['request_id', "TEXT NOT NULL DEFAULT ''"],
+    ['cache_creation_tokens', 'INTEGER NOT NULL DEFAULT 0'],
+    ['uncached_input_tokens', 'INTEGER NOT NULL DEFAULT 0'],
+    ['source_cost', 'REAL NOT NULL DEFAULT 0'],
+    ['input_cost', 'REAL NOT NULL DEFAULT 0'],
+    ['cached_input_cost', 'REAL NOT NULL DEFAULT 0'],
+    ['cache_creation_cost', 'REAL NOT NULL DEFAULT 0'],
+    ['output_cost', 'REAL NOT NULL DEFAULT 0'],
+    ['pricing_version', "TEXT NOT NULL DEFAULT ''"],
+    ['pricing_confidence', "TEXT NOT NULL DEFAULT 'fallback'"],
+    ['pricing_context_tier', "TEXT NOT NULL DEFAULT 'standard'"],
+  ];
+
+  for (const [name, definition] of additions) {
+    if (!columns.has(name)) {
+      db.exec(`ALTER TABLE raw_usage_events ADD COLUMN ${name} ${definition}`);
+    }
+  }
+
+  if (!columns.has('source_cost')) {
+    db.exec('UPDATE raw_usage_events SET source_cost = cost');
+  }
+}
+
 export async function openDatabase(dbPath: string): Promise<Database> {
   await mkdir(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath, { create: true });
   createSchema(db);
+  ensureRawUsageColumns(db);
   for (const tableName of ROLLUP_TABLES) {
     ensureRollupColumns(db, tableName);
   }
@@ -510,31 +575,61 @@ export function persistEvents(db: Database, events: UsageEventRecord[]): { inser
     `INSERT INTO raw_usage_events (
       event_key,
       provider_key,
+      provider,
+      service_tier,
+      endpoint,
+      request_id,
       model,
       timestamp,
       timestamp_ms,
       input_tokens,
       output_tokens,
       cache_read_tokens,
+      cache_creation_tokens,
+      uncached_input_tokens,
       request_count,
+      source_cost,
+      input_cost,
+      cached_input_cost,
+      cache_creation_cost,
+      output_cost,
       cost,
+      pricing_version,
+      pricing_confidence,
+      pricing_context_tier,
       failed,
       live_seen,
       snapshot_seen
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(event_key) DO UPDATE SET
+      provider = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.provider ELSE raw_usage_events.provider END,
+      service_tier = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.service_tier ELSE raw_usage_events.service_tier END,
+      endpoint = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.endpoint ELSE raw_usage_events.endpoint END,
+      request_id = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.request_id ELSE raw_usage_events.request_id END,
+      cache_creation_tokens = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.cache_creation_tokens ELSE raw_usage_events.cache_creation_tokens END,
+      uncached_input_tokens = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.uncached_input_tokens ELSE raw_usage_events.uncached_input_tokens END,
+      source_cost = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.source_cost ELSE raw_usage_events.source_cost END,
+      input_cost = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.input_cost ELSE raw_usage_events.input_cost END,
+      cached_input_cost = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.cached_input_cost ELSE raw_usage_events.cached_input_cost END,
+      cache_creation_cost = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.cache_creation_cost ELSE raw_usage_events.cache_creation_cost END,
+      output_cost = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.output_cost ELSE raw_usage_events.output_cost END,
+      cost = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.cost ELSE raw_usage_events.cost END,
+      pricing_version = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.pricing_version ELSE raw_usage_events.pricing_version END,
+      pricing_confidence = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.pricing_confidence ELSE raw_usage_events.pricing_confidence END,
+      pricing_context_tier = CASE WHEN excluded.live_seen = 1 OR raw_usage_events.live_seen = 0 THEN excluded.pricing_context_tier ELSE raw_usage_events.pricing_context_tier END,
       live_seen = MAX(raw_usage_events.live_seen, excluded.live_seen),
       snapshot_seen = MAX(raw_usage_events.snapshot_seen, excluded.snapshot_seen),
       last_ingested_at = CURRENT_TIMESTAMP`
   );
   const readChanges = db.query<ChangeRow>('SELECT changes() as changes');
   const existing = db.query<ExistingEventRow>(
-    'SELECT live_seen, snapshot_seen FROM raw_usage_events WHERE event_key = ?'
+    'SELECT live_seen, snapshot_seen, cost FROM raw_usage_events WHERE event_key = ?'
   );
 
   let inserted = 0;
   let updated = 0;
   const insertedEvents: UsageEventRecord[] = [];
+  const pricingDeltaEvents: UsageEventRecord[] = [];
   const sourceDeltaEvents: SourceDeltaEvent[] = [];
 
   const runBatch = db.transaction((rows: UsageEventRecord[]) => {
@@ -543,14 +638,28 @@ export function persistEvents(db: Database, events: UsageEventRecord[]): { inser
       insert.run([
         row.eventKey,
         row.providerKey,
+        row.provider,
+        row.serviceTier,
+        row.endpoint,
+        row.requestId,
         row.model,
         row.timestamp,
         row.timestampMs,
         row.inputTokens,
         row.outputTokens,
         row.cacheReadTokens,
+        row.cacheCreationTokens,
+        row.uncachedInputTokens,
         row.requestCount,
+        row.sourceCost,
+        row.inputCost,
+        row.cachedInputCost,
+        row.cacheCreationCost,
+        row.outputCost,
         row.cost,
+        row.pricingVersion,
+        row.pricingConfidence,
+        row.pricingContextTier,
         row.failed ? 1 : 0,
         row.liveSeen ? 1 : 0,
         row.snapshotSeen ? 1 : 0,
@@ -567,6 +676,26 @@ export function persistEvents(db: Database, events: UsageEventRecord[]): { inser
       }
 
       updated += 1;
+      if ((row.liveSeen || existingRow.live_seen === 0) && row.cost !== existingRow.cost) {
+        pricingDeltaEvents.push({
+          ...row,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          uncachedInputTokens: 0,
+          requestCount: 0,
+          sourceCost: 0,
+          inputCost: 0,
+          cachedInputCost: 0,
+          cacheCreationCost: 0,
+          outputCost: 0,
+          cost: row.cost - existingRow.cost,
+          failed: false,
+          liveSeen: false,
+          snapshotSeen: false,
+        });
+      }
       const liveRequestCount = row.liveSeen && existingRow.live_seen === 0 ? row.requestCount : 0;
       const snapshotRequestCount =
         row.snapshotSeen && existingRow.snapshot_seen === 0 ? row.requestCount : 0;
@@ -586,6 +715,9 @@ export function persistEvents(db: Database, events: UsageEventRecord[]): { inser
     upsertRollupTable(db, 'rollup_hourly', buildRollupAggregates(insertedEvents, 'hourly'));
     upsertRollupTable(db, 'rollup_daily', buildRollupAggregates(insertedEvents, 'daily'));
     upsertRollupTable(db, 'rollup_monthly', buildRollupAggregates(insertedEvents, 'monthly'));
+    upsertRollupTable(db, 'rollup_hourly', buildRollupAggregates(pricingDeltaEvents, 'hourly'));
+    upsertRollupTable(db, 'rollup_daily', buildRollupAggregates(pricingDeltaEvents, 'daily'));
+    upsertRollupTable(db, 'rollup_monthly', buildRollupAggregates(pricingDeltaEvents, 'monthly'));
 
     upsertRollupSourceDeltas(db, 'rollup_hourly', buildRollupSourceDeltas(sourceDeltaEvents, 'hourly'));
     upsertRollupSourceDeltas(db, 'rollup_daily', buildRollupSourceDeltas(sourceDeltaEvents, 'daily'));
@@ -595,12 +727,118 @@ export function persistEvents(db: Database, events: UsageEventRecord[]): { inser
       writeSyncValues(db, [
         ['serving.schema_version', ROLLUP_SCHEMA_VERSION],
         ['serving.last_updated_at', new Date().toISOString()],
+        ['pricing.version', PRICING_VERSION],
       ]);
     }
   });
 
   runBatch(events);
   return { inserted, updated };
+}
+
+export async function repriceUsage(dbPath: string): Promise<RepriceUsageSummary> {
+  const startedAt = new Date().toISOString();
+  const db = await openDatabase(dbPath);
+
+  try {
+    const rows = db
+      .query<RepriceRow>(
+        `SELECT
+          event_key,
+          provider,
+          service_tier,
+          model,
+          input_tokens,
+          output_tokens,
+          cache_read_tokens,
+          cache_creation_tokens,
+          source_cost,
+          pricing_confidence
+        FROM raw_usage_events`
+      )
+      .all();
+    const update = db.query(
+      `UPDATE raw_usage_events SET
+        provider = ?,
+        service_tier = ?,
+        uncached_input_tokens = ?,
+        input_cost = ?,
+        cached_input_cost = ?,
+        cache_creation_cost = ?,
+        output_cost = ?,
+        cost = ?,
+        pricing_version = ?,
+        pricing_confidence = ?,
+        pricing_context_tier = ?,
+        last_ingested_at = CURRENT_TIMESTAMP
+      WHERE event_key = ?`
+    );
+
+    const runBatch = db.transaction((items: RepriceRow[]) => {
+      for (const row of items) {
+        const pricing = calculatePricing({
+          model: row.model,
+          provider:
+            row.provider === 'unknown' ||
+            row.pricing_confidence === 'provider-assumed' ||
+            row.pricing_confidence === 'fallback'
+              ? undefined
+              : row.provider,
+          serviceTier:
+            row.pricing_confidence === 'standard-assumed' ||
+            row.pricing_confidence === 'fallback'
+              ? undefined
+              : row.service_tier,
+          inputTokens: row.input_tokens,
+          outputTokens: row.output_tokens,
+          cachedInputTokens: row.cache_read_tokens,
+          cacheCreationTokens: row.cache_creation_tokens,
+          sourceCost: row.source_cost,
+        });
+        update.run([
+          pricing.provider,
+          pricing.serviceTier,
+          pricing.uncachedInputTokens,
+          pricing.inputCost,
+          pricing.cachedInputCost,
+          pricing.cacheCreationCost,
+          pricing.outputCost,
+          pricing.cost,
+          pricing.pricingVersion,
+          pricing.pricingConfidence,
+          pricing.pricingContextTier,
+          row.event_key,
+        ]);
+      }
+
+      clearRollupTables(db);
+      const hourly = rebuildRollupTable(db, 'rollup_hourly', localBucketExpression('hourly'));
+      const daily = rebuildRollupTable(db, 'rollup_daily', localBucketExpression('daily'));
+      const monthly = rebuildRollupTable(db, 'rollup_monthly', localBucketExpression('monthly'));
+      const now = new Date().toISOString();
+      writeSyncValues(db, [
+        ['serving.schema_version', ROLLUP_SCHEMA_VERSION],
+        ['serving.last_rebuilt_at', now],
+        ['serving.last_updated_at', now],
+        ['pricing.version', PRICING_VERSION],
+        ['pricing.last_repriced_at', now],
+      ]);
+      return { hourly, daily, monthly };
+    });
+    const rollups = runBatch(rows);
+
+    return {
+      startedAt,
+      completedAt: new Date().toISOString(),
+      dbPath,
+      pricingVersion: PRICING_VERSION,
+      repriced: rows.length,
+      rawEventCount: rows.length,
+      rollups,
+    };
+  } finally {
+    db.close();
+  }
 }
 
 export async function rebuildRollups(dbPath: string): Promise<RebuildRollupsSummary> {

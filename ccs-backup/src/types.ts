@@ -1,16 +1,32 @@
 export type SourceKind = 'live' | 'snapshot';
 
+import type { PricingConfidence, PricingContextTier } from '@/pricing';
+
 export interface UsageEventRecord {
   eventKey: string;
   providerKey: string;
+  provider: string;
+  serviceTier: string;
+  endpoint: string;
+  requestId: string;
   model: string;
   timestamp: string;
   timestampMs: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheCreationTokens: number;
+  uncachedInputTokens: number;
   requestCount: number;
+  sourceCost: number;
+  inputCost: number;
+  cachedInputCost: number;
+  cacheCreationCost: number;
+  outputCost: number;
   cost: number;
+  pricingVersion: string;
+  pricingConfidence: PricingConfidence;
+  pricingContextTier: PricingContextTier;
   failed: boolean;
   liveSeen: boolean;
   snapshotSeen: boolean;

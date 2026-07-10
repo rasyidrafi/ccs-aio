@@ -1,0 +1,23 @@
+[Unit]
+Description=CCS Budget Limit Proxy
+After=network.target ccs-cliproxy.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment="PATH=/home/ezra/.bun/bin:/usr/bin:/bin"
+WorkingDirectory=/home/ezra/ccs-aio/ccs-limit
+ExecStart=/usr/bin/flock --nonblock %t/ccs-limit.lock /home/ezra/.bun/bin/bun run src/server.ts
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
+LimitNOFILE=65536
+NoNewPrivileges=true
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

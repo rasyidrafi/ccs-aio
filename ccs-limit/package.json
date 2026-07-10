@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "bun run --watch src/server.ts",
-    "start": "bun run src/server.ts",
+    "start": "flock -n /run/user/$(id -u)/ccs-limit.lock bun run src/server.ts",
     "typecheck": "bun x tsc --noEmit"
   },
   "dependencies": {

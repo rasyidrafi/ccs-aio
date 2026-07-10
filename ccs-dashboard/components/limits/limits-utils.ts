@@ -41,6 +41,66 @@ export function formatPercent(value: number | null): string {
   return `${Math.round(value)}%`
 }
 
+const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+const DAY_SECONDS = 24 * 60 * 60
+
+export interface WeeklyUsagePrediction {
+  remainingPercent: number
+  paceBalancePercent: number
+  recommendedDailyPercent: number
+  recoveryPercent: number | null
+  recoverySeconds: number | null
+  recommendationHorizonSeconds: number
+}
+
+export function getWeeklyUsagePrediction(
+  usedPercent: number,
+  resetAfterSeconds: number | null
+): WeeklyUsagePrediction | null {
+  if (resetAfterSeconds === null) return null
+
+  const used = Math.max(0, Math.min(100, usedPercent))
+  const secondsRemaining = Math.max(
+    0,
+    Math.min(WEEKLY_WINDOW_SECONDS, resetAfterSeconds)
+  )
+  const secondsElapsed = WEEKLY_WINDOW_SECONDS - secondsRemaining
+  const expectedUsedPercent =
+    (secondsElapsed / WEEKLY_WINDOW_SECONDS) * 100
+  const remainingPercent = Math.max(0, 100 - used)
+  const remainingDays = secondsRemaining / DAY_SECONDS
+  const recommendationHorizonSeconds = Math.min(
+    DAY_SECONDS,
+    secondsRemaining
+  )
+  const expectedAtHorizon =
+    ((secondsElapsed + recommendationHorizonSeconds) /
+      WEEKLY_WINDOW_SECONDS) *
+    100
+  const recoveryPercent = Math.max(0, expectedAtHorizon - used)
+  const recoverySeconds =
+    used > expectedUsedPercent
+      ? ((used - expectedUsedPercent) / 100) * WEEKLY_WINDOW_SECONDS
+      : null
+
+  return {
+    remainingPercent,
+    paceBalancePercent: expectedUsedPercent - used,
+    recommendedDailyPercent:
+      remainingDays > 0 ? remainingPercent / remainingDays : 0,
+    recoveryPercent,
+    recoverySeconds,
+    recommendationHorizonSeconds,
+  }
+}
+
+export function formatPredictionPercent(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(value))
+}
+
 export function getAlertVariant(
   severity: LimitsAlert["severity"]
 ): "default" | "destructive" {

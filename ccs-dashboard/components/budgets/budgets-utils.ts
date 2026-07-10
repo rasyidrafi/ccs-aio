@@ -28,6 +28,12 @@ export function formatDate(value: string): string {
   }).format(new Date(value + "T00:00:00"))
 }
 
+export function formatBudgetUsageSince(budget: BudgetRow): string {
+  const start =
+    budget.bypassSessionStartedAt?.slice(0, 10) || budget.usageStartDate
+  return `${formatCurrency(budget.spentUsd)} since ${formatDate(start)}`
+}
+
 export function formatDateTime(value: string | null): string {
   if (!value) return "Never"
   return new Intl.DateTimeFormat("en-US", {

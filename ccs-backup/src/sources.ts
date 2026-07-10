@@ -23,6 +23,7 @@ interface SnapshotPayload {
     inputTokens?: number;
     outputTokens?: number;
     cacheReadTokens?: number;
+    cacheCreationTokens?: number;
     requestCount?: number;
     cost?: number;
     failed?: boolean;
@@ -102,21 +103,6 @@ export async function loadLiveSource(config: ResolvedConfig): Promise<SyncSource
   const errors: string[] = [];
 
   try {
-    const events = await loadLegacyLiveEvents(config);
-    if (events.length > 0) {
-      return {
-        source: 'live',
-        ok: true,
-        eventCount: events.length,
-        events,
-      };
-    }
-    errors.push('legacy usage endpoint returned no request details');
-  } catch (error) {
-    errors.push(error instanceof Error ? error.message : 'Unknown legacy live source error');
-  }
-
-  try {
     const events = await loadUsageQueueEvents(config);
     return {
       source: 'live',
@@ -126,6 +112,18 @@ export async function loadLiveSource(config: ResolvedConfig): Promise<SyncSource
     };
   } catch (error) {
     errors.push(error instanceof Error ? error.message : 'Unknown usage-queue source error');
+  }
+
+  try {
+    const events = await loadLegacyLiveEvents(config);
+    return {
+      source: 'live',
+      ok: true,
+      eventCount: events.length,
+      events,
+    };
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : 'Unknown legacy live source error');
   }
 
   return {

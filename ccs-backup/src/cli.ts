@@ -1,5 +1,5 @@
 import { resolveConfig } from '@/config';
-import { readStatus, rebuildRollups } from '@/db';
+import { readStatus, rebuildRollups, repriceUsage } from '@/db';
 import { runBackfillOldData } from '@/backfill';
 import { runSync } from '@/sync';
 import type { SyncSourceMode } from '@/sources';
@@ -55,8 +55,15 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'reprice') {
+    const config = await resolveConfig(ccsDir, dbPath);
+    const summary = await repriceUsage(config.dbPath);
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
   console.error(
-    'Usage: bun run src/cli.ts <sync|sync-live|sync-snapshot|status|backfill-old-data|rebuild-rollups> [--ccs-dir <path>] [--db-path <path>] [--source-dir <path>] [--source <live|snapshot|all>]'
+    'Usage: bun run src/cli.ts <sync|sync-live|sync-snapshot|status|backfill-old-data|rebuild-rollups|reprice> [--ccs-dir <path>] [--db-path <path>] [--source-dir <path>] [--source <live|snapshot|all>]'
   );
   process.exitCode = 1;
 }

@@ -32,6 +32,11 @@ function readEnvFile(): Record<string, string> {
 
 const rawEnv = readEnvFile();
 
+function readPositiveNumber(key: string, fallback: number): number {
+  const value = Number(rawEnv[key] || process.env[key]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 export const config = {
   port: Number(rawEnv.PORT || process.env.PORT) || 8098,
   upstreamUrl: rawEnv.UPSTREAM_URL || process.env.UPSTREAM_URL || "http://127.0.0.1:8097",
@@ -52,4 +57,8 @@ export const config = {
     "data",
     "ccs-limit.db"
   ),
+  upstreamIdleTimeoutMs: readPositiveNumber("UPSTREAM_IDLE_TIMEOUT_MS", 300_000),
+  clientIdleTimeoutMs: readPositiveNumber("CLIENT_IDLE_TIMEOUT_MS", 300_000),
+  headersTimeoutMs: readPositiveNumber("HEADERS_TIMEOUT_MS", 15_000),
+  keepAliveTimeoutMs: readPositiveNumber("KEEP_ALIVE_TIMEOUT_MS", 5_000),
 };

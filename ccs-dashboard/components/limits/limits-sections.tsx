@@ -42,6 +42,7 @@ import {
   formatDateTime,
   formatNumber,
   formatPercent,
+  formatPredictionPercent,
   formatPlanLabel,
   formatRelativeSeconds,
   getAlertVariant,
@@ -49,6 +50,7 @@ import {
   getPlanBadgeVariant,
   getStatusBadgeVariant,
   getStatusLabel,
+  getWeeklyUsagePrediction,
 } from "@/components/limits/limits-utils"
 
 function RefreshScrim({ label = "Refreshing data..." }: { label?: string }) {
@@ -146,9 +148,135 @@ function QuotaCell({
   )
 }
 
+function UsagePredictionCell({
+  used,
+  resetAfterSeconds,
+}: {
+  used: number | null
+  resetAfterSeconds: number | null
+}) {
+  const prediction =
+    used === null
+      ? null
+      : getWeeklyUsagePrediction(used, resetAfterSeconds)
+
+  if (!prediction) {
+    return (
+      <div className="min-w-[190px] text-xs text-muted-foreground">
+        Prediction unavailable
+      </div>
+    )
+  }
+
+  const isExhausted = prediction.remainingPercent <= 0
+  const isOverPace = prediction.paceBalancePercent < -0.005
+  const isUnderPace = prediction.paceBalancePercent > 0.005
+  const horizonLabel =
+    prediction.recommendationHorizonSeconds < 86_400
+      ? `until reset (${formatRelativeSeconds(prediction.recommendationHorizonSeconds)})`
+      : "next 24h"
+
+  return (
+    <div className="min-w-[190px] space-y-1 text-xs tabular-nums">
+      <div
+        className={cn(
+          "font-medium",
+          isExhausted ? "text-destructive" : "text-emerald-700 dark:text-emerald-400"
+        )}
+      >
+        {formatPredictionPercent(prediction.remainingPercent)}% remaining usage
+      </div>
+      <div
+        className={cn(
+          "font-medium",
+          isOverPace
+            ? "text-destructive"
+            : isUnderPace
+              ? "text-emerald-700 dark:text-emerald-400"
+              : "text-muted-foreground"
+        )}
+      >
+        {isOverPace
+          ? `-${formatPredictionPercent(prediction.paceBalancePercent)}% over pace`
+          : isUnderPace
+            ? `+${formatPredictionPercent(prediction.paceBalancePercent)}% usage buffer`
+            : "On pace"}
+      </div>
+      <div className="text-muted-foreground">
+        {isOverPace
+          ? prediction.recoveryPercent !== null &&
+            prediction.recoveryPercent > 0.005
+            ? `Use \u2264${formatPredictionPercent(prediction.recoveryPercent)}% ${horizonLabel} to recover`
+            : `Pause for ${formatRelativeSeconds(prediction.recoverySeconds)} to recover`
+          : `Recommended \u2264${formatPredictionPercent(prediction.recommendedDailyPercent)}%/day until reset`}
+      </div>
+    </div>
+  )
+}
+
 function isProPlan(planType: string | null): boolean {
   const value = planType?.toLowerCase() ?? ""
   return value === "pro" || value === "prolite"
+}
+
+const PRO_PLUS_ORBIT_TURNS = [-48, -24, 0, 24, 48, 72, 96, 120, 144]
+
+const PRO_PLUS_ORBIT_FRONT_PATH = PRO_PLUS_ORBIT_TURNS.map(
+  (start) => `M ${start} 3 C ${start + 4} 3 ${start + 8} 37 ${start + 12} 37`
+).join(" ")
+
+const PRO_PLUS_ORBIT_BACK_PATH = PRO_PLUS_ORBIT_TURNS.map(
+  (start) =>
+    `M ${start + 12} 37 C ${start + 16} 37 ${start + 20} 3 ${start + 24} 3`
+).join(" ")
+
+function ProPlusOrbit({ layer }: { layer: "back" | "front" }) {
+  const path =
+    layer === "front" ? PRO_PLUS_ORBIT_FRONT_PATH : PRO_PLUS_ORBIT_BACK_PATH
+
+  return (
+    <span
+      className={cn("plan-chip-orbit-layer", `plan-chip-orbit-layer-${layer}`)}
+      aria-hidden="true"
+    >
+      <svg viewBox="0 0 90 40" focusable="false">
+        <g className="plan-chip-orbit-motion">
+          <path className="plan-chip-orbit-edge" d={path} />
+          <path className="plan-chip-orbit-core" d={path} />
+          {layer === "front" ? (
+            <path className="plan-chip-orbit-hot" d={path} />
+          ) : null}
+        </g>
+      </svg>
+    </span>
+  )
+}
+
+function PlanBadge({ planType }: { planType: string | null }) {
+  const isProPlus = planType?.toLowerCase() === "pro"
+  const label = formatPlanLabel(planType)
+
+  return (
+    <Badge
+      variant={getPlanBadgeVariant(planType)}
+      className={cn(
+        getPlanBadgeClassName(planType),
+        isProPlus &&
+          "!h-6 !min-w-[3.65rem] !overflow-visible !border-0 !bg-transparent !p-0 !shadow-none"
+      )}
+    >
+      {isProPlus ? (
+        <>
+          <ProPlusOrbit layer="back" />
+          <span className="plan-chip-capsule" aria-hidden="true" />
+          <ProPlusOrbit layer="front" />
+          <span className="plan-chip-label">{label}</span>
+        </>
+      ) : (
+        label
+      )}
+    </Badge>
+  )
 }
 
 function getSparkPool(account: LimitsAccountRow) {
@@ -197,7 +325,7 @@ function RedeemAction({
   const disabled = Boolean(disabledReason) || redeeming
   const tooltip = redeeming
     ? "Redeeming reset credit..."
-    : disabledReason ?? "Redeem one Codex reset credit for this account."
+    : (disabledReason ?? "Redeem one Codex reset credit for this account.")
 
   return (
     <span
@@ -298,7 +426,7 @@ export function LimitsTable({
       </CardHeader>
       <CardContent className="min-h-0 flex-1">
         <ScrollArea className="h-full rounded-lg border border-border/70">
-          <Table className="min-w-[1440px]">
+          <Table className="min-w-[1640px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
                 <TableHead className="sticky top-0 z-10 bg-card text-center">
@@ -316,6 +444,9 @@ export function LimitsTable({
                 <TableHead className="sticky top-0 z-10 bg-card">5h</TableHead>
                 <TableHead className="sticky top-0 z-10 bg-card">
                   Weekly
+                </TableHead>
+                <TableHead className="sticky top-0 z-10 bg-card">
+                  Usage Prediction
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 w-[88px] bg-card text-center">
                   Reset
@@ -341,7 +472,7 @@ export function LimitsTable({
               {limits.accounts.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={12}
+                    colSpan={13}
                     className="h-32 text-center text-sm text-muted-foreground"
                   >
                     No Codex accounts were discovered.
@@ -399,12 +530,7 @@ export function LimitsTable({
                           </Badge>
                         </TableCell>
                         <TableCell rowSpan={rowSpan}>
-                          <Badge
-                            variant={getPlanBadgeVariant(account.planType)}
-                            className={getPlanBadgeClassName(account.planType)}
-                          >
-                            {formatPlanLabel(account.planType)}
-                          </Badge>
+                          <PlanBadge planType={account.planType} />
                         </TableCell>
                         <TableCell>
                           <QuotaCell
@@ -422,6 +548,14 @@ export function LimitsTable({
                           <QuotaCell
                             label="Weekly"
                             remaining={account.weekly?.remainingPercent ?? null}
+                            used={account.weekly?.usedPercent ?? null}
+                            resetAfterSeconds={
+                              account.weekly?.resetAfterSeconds ?? null
+                            }
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <UsagePredictionCell
                             used={account.weekly?.usedPercent ?? null}
                             resetAfterSeconds={
                               account.weekly?.resetAfterSeconds ?? null
@@ -506,6 +640,14 @@ export function LimitsTable({
                               remaining={
                                 sparkPool.weekly?.remainingPercent ?? null
                               }
+                              used={sparkPool.weekly?.usedPercent ?? null}
+                              resetAfterSeconds={
+                                sparkPool.weekly?.resetAfterSeconds ?? null
+                              }
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <UsagePredictionCell
                               used={sparkPool.weekly?.usedPercent ?? null}
                               resetAfterSeconds={
                                 sparkPool.weekly?.resetAfterSeconds ?? null

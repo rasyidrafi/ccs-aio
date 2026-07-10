@@ -70,6 +70,7 @@ import {
   getStateBadgeVariant,
 } from "@/components/dashboard/dashboard-utils"
 import {
+  formatBudgetUsageSince,
   formatCurrency,
   formatDate,
   formatPercent,
@@ -586,7 +587,7 @@ export function UsageTable({
                         <div className="flex items-center justify-between gap-3">
                           <span className="text-xs font-medium text-muted-foreground">
                             {row.budget.bypassLimitEnabled
-                              ? formatCurrency(row.budget.spentUsd)
+                              ? formatBudgetUsageSince(row.budget)
                               : `${formatCurrency(
                                   row.budget.spentUsd
                                 )} / ${formatCurrency(
@@ -629,17 +630,26 @@ export function UsageTable({
                   </TableCell>
                   <TableCell className="min-w-[180px] text-sm text-muted-foreground">
                     {row.budget ? (
-                      <>
-                        {formatDate(row.budget.week_start_date)} &rarr;{" "}
-                        {formatDate(row.budget.next_reset_date)}
-                      </>
+                      row.budget.bypassLimitEnabled ? (
+                        <>
+                          Since {formatDate(row.budget.usageStartDate)} &rarr;{" "}
+                          Today
+                        </>
+                      ) : (
+                        <>
+                          {formatDate(row.budget.week_start_date)} &rarr;{" "}
+                          {formatDate(row.budget.next_reset_date)}
+                        </>
+                      )
                     ) : (
                       "—"
                     )}
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground tabular-nums">
                     {row.budget
-                      ? formatBudgetResetIn(row.budget.daysUntilReset)
+                      ? row.budget.bypassLimitEnabled
+                        ? "Unlimited"
+                        : formatBudgetResetIn(row.budget.daysUntilReset)
                       : "—"}
                   </TableCell>
                   <TableCell>{formatDateTime(row.lastUsed)}</TableCell>

@@ -65,6 +65,7 @@ import type { ApiKeyEntry, BudgetRow, BudgetWindow } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
   TABLE_PANEL_HEIGHT,
+  formatBudgetUsageSince,
   formatCurrency,
   formatDate,
   formatPercent,
@@ -290,7 +291,7 @@ function BudgetRowItem({
           <div className="flex items-center justify-between gap-3">
             <span className="text-xs font-medium text-muted-foreground">
               {bypassLimitEnabled
-                ? formatCurrency(budget.spentUsd)
+                ? formatBudgetUsageSince(budget)
                 : `${formatCurrency(budget.spentUsd)} / ${formatCurrency(
                     budget.weekly_limit_usd
                   )}`}
@@ -425,6 +426,12 @@ function SharedBudgetWindowControl({
   const resetLabel = budgetWindow
     ? formatBudgetResetIn(budgetWindow.daysUntilReset)
     : "Loading"
+  const bypassEnabled = Boolean(budgetWindow?.bypass_limit_enabled)
+  const triggerDisabled = refreshing || !budgetWindow || bypassEnabled
+
+  useEffect(() => {
+    if (bypassEnabled) setIsOpen(false)
+  }, [bypassEnabled])
 
   return (
     <div className="flex w-full flex-col gap-2 sm:w-auto">
@@ -435,11 +442,11 @@ function SharedBudgetWindowControl({
             <Button
               variant="outline"
               className="h-8 min-w-56 justify-between gap-2 border-border/70 bg-background sm:h-9"
-              disabled={refreshing || !budgetWindow}
+              disabled={triggerDisabled}
             >
               <span className="truncate text-left">{rangeLabel}</span>
               <span className="shrink-0 text-xs text-muted-foreground">
-                {resetLabel}
+                {bypassEnabled ? "Bypass active" : resetLabel}
               </span>
               <CalendarDays className="size-4 shrink-0" />
             </Button>
@@ -521,7 +528,7 @@ function BypassLimitControl({
             disabled={refreshing}
           >
             <Sparkles className="size-4" />
-            {enabled ? "Bypass Active" : "Bypas Limit"}
+            {enabled ? "Bypass Active" : "Bypass Limit"}
           </Button>
         </AlertDialogTrigger>
         <AlertDialogContent>
