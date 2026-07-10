@@ -179,8 +179,8 @@ function UsagePredictionCell({
         )}
       >
         {hasDailySurplus
-          ? `${formatPredictionPercent(prediction.dailyBalancePercent)}% surplus`
-          : `${formatPredictionPercent(prediction.dailyBalancePercent)}% over`}
+          ? `${formatPredictionPercent(prediction.dailyBalancePercent)}% Surplus`
+          : `${formatPredictionPercent(prediction.dailyBalancePercent)}% Over`}
       </div>
     </div>
   )
@@ -417,8 +417,8 @@ export function LimitsTable({
                 <TableHead className="sticky top-0 z-10 bg-card">
                   Weekly
                 </TableHead>
-                <TableHead className="sticky top-0 z-10 bg-card">
-                  Fair Usage (14.29%/day)
+                <TableHead className="sticky top-0 z-10 bg-card text-center">
+                  Usage 14.29%/day
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 w-[88px] bg-card text-center">
                   Reset
@@ -526,7 +526,7 @@ export function LimitsTable({
                             }
                           />
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="text-center">
                           <UsagePredictionCell
                             used={account.weekly?.usedPercent ?? null}
                             resetAfterSeconds={
@@ -618,7 +618,7 @@ export function LimitsTable({
                               }
                             />
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="text-center">
                             <UsagePredictionCell
                               used={sparkPool.weekly?.usedPercent ?? null}
                               resetAfterSeconds={
