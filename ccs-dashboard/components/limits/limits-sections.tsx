@@ -166,21 +166,10 @@ function UsagePredictionCell({
     )
   }
 
-  const isExhausted = prediction.remainingPercent <= 0
   const hasDailySurplus = prediction.dailyBalancePercent >= 0
 
   return (
-    <div className="min-w-[190px] space-y-1 text-xs tabular-nums">
-      <div
-        className={cn(
-          "font-medium",
-          isExhausted
-            ? "text-destructive"
-            : "text-emerald-700 dark:text-emerald-400"
-        )}
-      >
-        {formatPredictionPercent(prediction.remainingPercent)}% remaining usage
-      </div>
+    <div className="min-w-[190px] text-xs tabular-nums">
       <div
         className={cn(
           "font-medium",
@@ -190,8 +179,8 @@ function UsagePredictionCell({
         )}
       >
         {hasDailySurplus
-          ? `${formatPredictionPercent(prediction.dailyBalancePercent)}% surplus (Day ${prediction.dayNumber} allowance ${formatPredictionPercent(prediction.dailyAllowancePercent)}%)`
-          : `${formatPredictionPercent(prediction.dailyBalancePercent)}% over (Day ${prediction.dayNumber} allowance ${formatPredictionPercent(prediction.dailyAllowancePercent)}%)`}
+          ? `${formatPredictionPercent(prediction.dailyBalancePercent)}% surplus`
+          : `${formatPredictionPercent(prediction.dailyBalancePercent)}% over`}
       </div>
     </div>
   )
@@ -429,7 +418,7 @@ export function LimitsTable({
                   Weekly
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 bg-card">
-                  Usage Prediction
+                  Fair Usage (14.29%/day)
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 w-[88px] bg-card text-center">
                   Reset

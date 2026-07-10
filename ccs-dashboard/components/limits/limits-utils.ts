@@ -45,9 +45,6 @@ const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
 const DAY_SECONDS = 24 * 60 * 60
 
 export interface WeeklyUsagePrediction {
-  remainingPercent: number
-  dayNumber: number
-  dailyAllowancePercent: number
   dailyBalancePercent: number
 }
 
@@ -76,12 +73,8 @@ export function getWeeklyUsagePrediction(
   )
   const dayNumber = Math.max(1, Math.min(7, elapsedCalendarDays + 1))
   const dailyAllowancePercent = (dayNumber / 7) * 100
-  const remainingPercent = Math.max(0, 100 - used)
 
   return {
-    remainingPercent,
-    dayNumber,
-    dailyAllowancePercent,
     dailyBalancePercent: dailyAllowancePercent - used,
   }
 }
