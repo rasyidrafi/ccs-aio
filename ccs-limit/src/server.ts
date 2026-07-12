@@ -1,5 +1,7 @@
 import http from "node:http";
 import https from "node:https";
+import net from "node:net";
+import tls from "node:tls";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pipeline, Readable } from "node:stream";
@@ -8,7 +10,7 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import YAML from "yaml";
 import { config } from "./config";
 import { signJwt, verifyJwt, validateCredentials } from "./auth";
-import { hashApiKey, providerKeyFromApiKey } from "./pricing";
+import { hashApiKey } from "./pricing";
 import {
   getBudget,
   getAllBudgets,
@@ -30,9 +32,16 @@ import {
 import {
   getCostForDateWindow,
   getCostForTimestampWindow,
+  getCostsForDateWindow,
+  getCostsForTimestampWindow,
 } from "./usage";
 import { resolveApiKeys } from "./api-keys";
 import { ok, fail, extractBearerToken, CORS_HEADERS } from "./response";
+import {
+  getAbsoluteRequestTarget,
+  getRequestPath,
+  isUnsafeAbsoluteRequestTarget,
+} from "./upstream-url";
 
 type NodeHandler = (
   req: http.IncomingMessage,
@@ -102,6 +111,25 @@ function getBudgetUsageCost(
   );
 }
 
+function getBudgetUsageCosts(
+  providerKeys: string[],
+  usageWindow: ReturnType<typeof resolveBudgetUsageWindow>,
+): Map<string, number> {
+  if (usageWindow.useExactTimestamps) {
+    return getCostsForTimestampWindow(
+      providerKeys,
+      usageWindow.costStartInclusive,
+      usageWindow.costEndExclusive,
+    );
+  }
+
+  return getCostsForDateWindow(
+    providerKeys,
+    usageWindow.costStartInclusive,
+    usageWindow.costEndExclusive,
+  );
+}
+
 const HOP_BY_HOP_REQUEST_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -125,17 +153,47 @@ const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
 const CODEX_BACKEND_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_USER_AGENT = "codex-cli";
 
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 256,
-  maxFreeSockets: 32,
-  timeout: config.upstreamIdleTimeoutMs,
-});
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 256,
-  maxFreeSockets: 32,
-  timeout: config.upstreamIdleTimeoutMs,
+const httpAgent = config.nodePort > 0
+  ? new http.Agent({
+      keepAlive: true,
+      maxSockets: 256,
+      maxFreeSockets: 32,
+      timeout: config.upstreamIdleTimeoutMs,
+    })
+  : undefined;
+const httpsAgent = config.nodePort > 0
+  ? new https.Agent({
+      keepAlive: true,
+      maxSockets: 256,
+      maxFreeSockets: 32,
+      timeout: config.upstreamIdleTimeoutMs,
+    })
+  : undefined;
+const upstreamTarget = new URL(config.upstreamUrl);
+const upstreamTransport = upstreamTarget.protocol === "https:" ? https : http;
+const upstreamAgent = upstreamTarget.protocol === "https:" ? httpsAgent : httpAgent;
+const upstreamHost = upstreamTarget.host;
+const upstreamPort = upstreamTarget.port || undefined;
+const unsafeClients = new Map<string, number>();
+const MAX_UNSAFE_CLIENTS = 4_096;
+const UNSAFE_REQUEST_BODY = Buffer.from(
+  JSON.stringify({
+    error: {
+      message: "Absolute request targets are not allowed",
+      type: "invalid_request_error",
+    },
+  }),
+);
+const HEALTH_BODY = Buffer.from(
+  JSON.stringify({ ok: true, data: { status: "ok", upstream: config.upstreamUrl } }),
+);
+const HEALTH_RESPONSE = new Response(HEALTH_BODY, {
+  status: 200,
+  headers: {
+    "Content-Type": "application/json",
+    "Content-Length": HEALTH_BODY.length.toString(),
+    ...CORS_HEADERS,
+  },
 });
 
 type CodexAuthFile = {
@@ -176,15 +234,23 @@ type CodexConsumeResponse = {
   windowsReset?: number;
 };
 
+type WebSocketPayload = string | ArrayBuffer | Uint8Array;
+
+type WebSocketBridge = {
+  upstream: WebSocket;
+  client: Bun.ServerWebSocket<WebSocketBridge> | null;
+  pendingToClient: WebSocketPayload[];
+};
+
+const BunWebSocket = WebSocket as unknown as {
+  new (url: string | URL, options?: Bun.WebSocketOptions): WebSocket;
+};
+
 function extractApiKeyFromAuthHeader(
   authHeader: string | undefined,
 ): string | null {
   if (!authHeader?.startsWith("Bearer ")) return null;
   return authHeader.slice(7).trim() || null;
-}
-
-function getRoutePath(url: URL): string {
-  return url.pathname;
 }
 
 function shouldSkipBudgetPrecheck(pathname: string): boolean {
@@ -309,29 +375,57 @@ async function writeNodeResponse(
 
 function cloneProxyHeaders(
   headers: http.IncomingHttpHeaders,
-  target: URL,
-  isUpgrade: boolean,
 ): http.OutgoingHttpHeaders {
   const outgoing: http.OutgoingHttpHeaders = {};
 
-  for (const [key, value] of Object.entries(headers)) {
+  for (const key in headers) {
+    const value = headers[key];
     if (value === undefined) {
       continue;
     }
 
-    const lowerKey = key.toLowerCase();
-    if (lowerKey === "host") {
+    if (key === "host") {
       continue;
     }
-    if (!isUpgrade && HOP_BY_HOP_REQUEST_HEADERS.has(lowerKey)) {
+    if (HOP_BY_HOP_REQUEST_HEADERS.has(key)) {
       continue;
     }
 
     outgoing[key] = value;
   }
 
-  outgoing.host = target.host;
+  outgoing.host = upstreamHost;
   return outgoing;
+}
+
+function markUnsafeClient(req: http.IncomingMessage): void {
+  const address = req.socket.remoteAddress;
+  if (!address || address === "127.0.0.1" || address === "::1") return;
+
+  const now = Date.now();
+  if (unsafeClients.size >= MAX_UNSAFE_CLIENTS) {
+    for (const [client, expiresAt] of unsafeClients) {
+      if (expiresAt <= now || unsafeClients.size >= MAX_UNSAFE_CLIENTS) {
+        unsafeClients.delete(client);
+      }
+      if (unsafeClients.size < MAX_UNSAFE_CLIENTS) break;
+    }
+  }
+  unsafeClients.set(address, now + config.unsafeClientBlockMs);
+}
+
+function writeBufferResponse(
+  res: http.ServerResponse,
+  statusCode: number,
+  body: Buffer,
+  close = false,
+): void {
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json",
+    "Content-Length": body.length,
+    ...(close ? { Connection: "close" } : CORS_HEADERS),
+  });
+  res.end(body);
 }
 
 function writeUpgradeFailure(
@@ -555,43 +649,52 @@ async function handleListBudgets(): Promise<Response> {
   const budgets = getAllBudgets();
   const today = todayDate();
   const allKeys = await resolveApiKeys();
+  const apiKeyNames = new Map(allKeys.map((key) => [key.hash, key.name]));
   const bypassLimitEnabled = isBudgetBypassEnabled();
+  const usageWindow = budgets[0]
+    ? resolveBudgetUsageWindow(
+        budgets[0].week_start_date,
+        budgets[0].next_reset_date,
+        bypassLimitEnabled,
+      )
+    : null;
+  const costs = usageWindow
+    ? getBudgetUsageCosts(
+        budgets.map((budget) => `api-key:${budget.api_key_hash}`),
+        usageWindow,
+      )
+    : new Map<string, number>();
 
-  const enriched = await Promise.all(
-    budgets.map(async (b) => {
-      const b2 = autoAdvanceWeek(b);
-      const providerKey = `api-key:${b2.api_key_hash}`;
-      const usageWindow = resolveBudgetUsageWindow(
-        b2.week_start_date,
-        b2.next_reset_date,
-        bypassLimitEnabled,
-      );
-      const spent = getBudgetUsageCost(providerKey, usageWindow);
-      const matched = allKeys.find((k) => k.hash === b2.api_key_hash);
-      return {
-        ...b2,
-        apiKeyName: matched?.name ?? null,
-        spentUsd: spent,
-        remainingUsd: Math.max(0, b2.weekly_limit_usd - spent),
-        percentUsed:
-          b2.weekly_limit_usd > 0 ? (spent / b2.weekly_limit_usd) * 100 : 0,
-        isOverBudget: bypassLimitEnabled ? false : spent >= b2.weekly_limit_usd,
-        daysUntilReset: Math.max(
-          0,
-          Math.ceil(
-            (new Date(b2.next_reset_date + "T00:00:00Z").getTime() -
-              new Date(today + "T00:00:00Z").getTime()) /
-              86400000,
-          ),
+  const enriched = budgets.map((budget) => {
+    const providerKey = `api-key:${budget.api_key_hash}`;
+    const spent = costs.get(providerKey) ?? 0;
+    return {
+      ...budget,
+      apiKeyName: apiKeyNames.get(budget.api_key_hash) ?? null,
+      spentUsd: spent,
+      remainingUsd: Math.max(0, budget.weekly_limit_usd - spent),
+      percentUsed:
+        budget.weekly_limit_usd > 0
+          ? (spent / budget.weekly_limit_usd) * 100
+          : 0,
+      isOverBudget: bypassLimitEnabled
+        ? false
+        : spent >= budget.weekly_limit_usd,
+      daysUntilReset: Math.max(
+        0,
+        Math.ceil(
+          (new Date(budget.next_reset_date + "T00:00:00Z").getTime() -
+            new Date(today + "T00:00:00Z").getTime()) /
+            86400000,
         ),
-        bypassLimitEnabled,
-        usageStartDate: usageWindow.usageStartDate,
-        usageEndDate: usageWindow.usageEndDate,
-        bypassSessionStartedAt: usageWindow.bypassSessionStartedAt,
-        bypassSessionEndedAt: usageWindow.bypassSessionEndedAt,
-      };
-    }),
-  );
+      ),
+      bypassLimitEnabled,
+      usageStartDate: usageWindow?.usageStartDate ?? budget.week_start_date,
+      usageEndDate: usageWindow?.usageEndDate ?? budget.next_reset_date,
+      bypassSessionStartedAt: usageWindow?.bypassSessionStartedAt ?? null,
+      bypassSessionEndedAt: usageWindow?.bypassSessionEndedAt ?? null,
+    };
+  });
 
   return ok(enriched);
 }
@@ -860,14 +963,81 @@ async function handleListApiKeys(): Promise<Response> {
   );
 }
 
+async function handleLocalApiRequest(
+  path: string,
+  method: string,
+  request: Request,
+): Promise<Response> {
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+  if (path === "/api/auth/login" && method === "POST") {
+    return handleLogin(request);
+  }
+  if (path === "/api/public/budgets" && method === "GET") {
+    return handleListBudgets();
+  }
+
+  const authErr = await requireAdmin(request);
+  if (authErr) return authErr;
+
+  if (path === "/api/budgets" && method === "GET") {
+    return handleListBudgets();
+  }
+  if (path === "/api/budgets" && method === "POST") {
+    return handleCreateBudget(request);
+  }
+  if (path === "/api/budgets/bypass" && method === "PUT") {
+    return handleUpdateBudgetBypass(request);
+  }
+  if (path === "/api/budgets/window" && method === "GET") {
+    return handleGetBudgetWindow();
+  }
+  if (path === "/api/budgets/window" && method === "PUT") {
+    return handleUpdateBudgetWindow(request);
+  }
+
+  const budgetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)$/);
+  if (budgetMatch) {
+    if (method === "GET") return handleGetBudget(budgetMatch[1]);
+    if (method === "DELETE") return handleDeleteBudget(budgetMatch[1]);
+  }
+
+  const resetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/reset-date$/);
+  if (resetMatch && method === "PUT") {
+    return handleUpdateResetDate(resetMatch[1], request);
+  }
+
+  const rangeMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/date-range$/);
+  if (rangeMatch && method === "PUT") {
+    return handleUpdateBudgetDateRange(rangeMatch[1], request);
+  }
+
+  const limitMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/limit$/);
+  if (limitMatch && method === "PUT") {
+    return handleUpdateLimit(limitMatch[1], request);
+  }
+
+  const toggleMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/enabled$/);
+  if (toggleMatch && method === "PUT") {
+    return handleToggleBudget(toggleMatch[1], request);
+  }
+
+  const redeemMatch = path.match(/^\/api\/codex-resets\/([^/]+)\/redeem$/);
+  if (redeemMatch && method === "POST") {
+    return handleRedeemCodexReset(redeemMatch[1]);
+  }
+  if (path === "/api/keys" && method === "GET") {
+    return handleListApiKeys();
+  }
+
+  return fail("Not found", 404);
+}
+
 async function proxyUpstreamHttp(
   req: http.IncomingMessage,
   res: http.ServerResponse,
 ): Promise<void> {
-  const target = new URL(req.url || "/", config.upstreamUrl);
-  const transport = target.protocol === "https:" ? https : http;
-  const agent = target.protocol === "https:" ? httpsAgent : httpAgent;
-
   await new Promise<void>((resolve) => {
     let settled = false;
     let upstreamRes: http.IncomingMessage | null = null;
@@ -892,22 +1062,23 @@ async function proxyUpstreamHttp(
       }
     };
 
-    const upstreamReq = transport.request(
+    const upstreamReq = upstreamTransport.request(
       {
-        protocol: target.protocol,
-        hostname: target.hostname,
-        port: target.port || undefined,
+        protocol: upstreamTarget.protocol,
+        hostname: upstreamTarget.hostname,
+        port: upstreamPort,
         method: req.method,
-        path: `${target.pathname}${target.search}`,
-        headers: cloneProxyHeaders(req.headers, target, false),
-        agent,
+        path: req.url || "/",
+        headers: cloneProxyHeaders(req.headers),
+        agent: upstreamAgent,
       },
       (response) => {
         upstreamRes = response;
-        for (const [key, value] of Object.entries(response.headers)) {
+        for (const key in response.headers) {
+          const value = response.headers[key];
           if (
             value === undefined ||
-            HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())
+            HOP_BY_HOP_RESPONSE_HEADERS.has(key)
           ) {
             continue;
           }
@@ -957,118 +1128,126 @@ async function proxyUpstreamHttp(
   });
 }
 
+function cloneFetchRequestHeaders(headers: Headers): Headers {
+  const outgoing = new Headers(headers);
+  outgoing.delete("host");
+  for (const header of HOP_BY_HOP_REQUEST_HEADERS) outgoing.delete(header);
+  return outgoing;
+}
+
+function cloneFetchResponseHeaders(headers: Headers): Headers {
+  const outgoing = new Headers(headers);
+  for (const header of HOP_BY_HOP_RESPONSE_HEADERS) outgoing.delete(header);
+  return outgoing;
+}
+
+async function proxyUpstreamFetch(
+  request: Request,
+  requestTarget = getAbsoluteRequestTarget(request.url),
+): Promise<Response> {
+  const target = `${upstreamTarget.origin}${requestTarget}`;
+  const method = request.method;
+
+  try {
+    const response = await fetch(target, {
+      method,
+      headers: cloneFetchRequestHeaders(request.headers),
+      body: method === "GET" || method === "HEAD" ? undefined : request.body,
+      signal: request.signal,
+      redirect: "manual",
+      decompress: false,
+      keepalive: true,
+    });
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: cloneFetchResponseHeaders(response.headers),
+    });
+  } catch (error) {
+    return new Response(
+      JSON.stringify(
+        proxyErrorPayload(
+          `Upstream connection failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      ),
+      { status: 502, headers: { "Content-Type": "application/json" } },
+    );
+  }
+}
+
 function proxyUpstreamUpgrade(
   req: http.IncomingMessage,
   socket: Duplex,
   head: Buffer,
 ): void {
-  const target = new URL(req.url || "/", config.upstreamUrl);
-  const transport = target.protocol === "https:" ? https : http;
-  const agent = target.protocol === "https:" ? httpsAgent : httpAgent;
-
-  const upstreamReq = transport.request({
-    protocol: target.protocol,
-    hostname: target.hostname,
-    port: target.port || undefined,
-    method: req.method,
-    path: `${target.pathname}${target.search}`,
-    headers: cloneProxyHeaders(req.headers, target, true),
-    agent,
-  });
-
-  upstreamReq.setTimeout(config.upstreamIdleTimeoutMs, () => {
-    upstreamReq.destroy(new Error("Upstream upgrade timed out"));
-  });
-
-  socket.once("close", () => upstreamReq.destroy());
-
-  const closeSockets = () => {
-    if (!socket.destroyed) {
-      socket.destroy();
+  const requestLines = [
+    `${req.method || "GET"} ${req.url || "/"} HTTP/${req.httpVersion}`,
+  ];
+  let wroteHost = false;
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    const name = req.rawHeaders[index];
+    const value = req.rawHeaders[index + 1];
+    if (name.toLowerCase() === "host") {
+      requestLines.push(`${name}: ${upstreamHost}`);
+      wroteHost = true;
+    } else {
+      requestLines.push(`${name}: ${value}`);
     }
+  }
+  if (!wroteHost) requestLines.push(`Host: ${upstreamHost}`);
+  requestLines.push("", "");
+  const handshake = Buffer.from(requestLines.join("\r\n"));
+  const port = Number(upstreamPort) || (upstreamTarget.protocol === "https:" ? 443 : 80);
+  let connected = false;
+
+  const onConnect = (upstreamSocket: net.Socket): void => {
+    connected = true;
+    upstreamSocket.setTimeout(config.upstreamIdleTimeoutMs);
+    upstreamSocket.write(handshake);
+    if (head.length > 0) upstreamSocket.write(head);
+    upstreamSocket.on("data", (data) => {
+      if (!socket.write(data)) upstreamSocket.pause();
+    });
+    socket.on("drain", () => upstreamSocket.resume());
+    socket.on("data", (data) => {
+      if (!upstreamSocket.write(data)) socket.pause();
+    });
+    upstreamSocket.on("drain", () => socket.resume());
+    socket.resume();
   };
 
-  upstreamReq.on("upgrade", (upstreamRes, upstreamSocket, upstreamHead) => {
-    const lines = [
-      `HTTP/${upstreamRes.httpVersion} 101 ${upstreamRes.statusMessage || "Switching Protocols"}`,
-    ];
-    for (const [key, value] of Object.entries(upstreamRes.headers)) {
-      if (value === undefined) {
-        continue;
-      }
-      if (Array.isArray(value)) {
-        for (const entry of value) {
-          lines.push(`${key}: ${entry}`);
-        }
-      } else {
-        lines.push(`${key}: ${value}`);
-      }
-    }
-    lines.push("", "");
-    socket.write(lines.join("\r\n"));
-
-    if (head.length > 0) {
-      upstreamSocket.write(head);
-    }
-    if (upstreamHead.length > 0) {
-      socket.write(upstreamHead);
-    }
-
-    upstreamSocket.on("error", closeSockets);
-    socket.on("error", () => upstreamSocket.destroy());
-    socket.on("close", () => upstreamSocket.destroy());
-    upstreamSocket.on("close", () => closeSockets());
-
-    upstreamSocket.pipe(socket);
-    socket.pipe(upstreamSocket);
-  });
-
-  upstreamReq.on("response", (upstreamRes) => {
-    const bodyChunks: Buffer[] = [];
-    upstreamRes.on("data", (chunk) => {
-      bodyChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  let upstreamSocket: net.Socket;
+  if (upstreamTarget.protocol === "https:") {
+    const tlsSocket = tls.connect({
+      host: upstreamTarget.hostname,
+      port,
+      servername: upstreamTarget.hostname,
     });
-    upstreamRes.on("end", () => {
-      const body = Buffer.concat(bodyChunks);
-      const lines = [
-        `HTTP/${upstreamRes.httpVersion} ${upstreamRes.statusCode || 502} ${upstreamRes.statusMessage || "Bad Gateway"}`,
-      ];
-      for (const [key, value] of Object.entries(upstreamRes.headers)) {
-        if (
-          value === undefined ||
-          HOP_BY_HOP_RESPONSE_HEADERS.has(key.toLowerCase())
-        ) {
-          continue;
-        }
-        if (Array.isArray(value)) {
-          for (const entry of value) {
-            lines.push(`${key}: ${entry}`);
-          }
-        } else {
-          lines.push(`${key}: ${value}`);
-        }
-      }
-      lines.push(`Content-Length: ${body.length}`, "Connection: close", "", "");
-      socket.write(lines.join("\r\n"));
-      if (body.length > 0) {
-        socket.write(body);
-      }
-      closeSockets();
-    });
-  });
+    upstreamSocket = tlsSocket;
+    tlsSocket.once("secureConnect", () => onConnect(tlsSocket));
+  } else {
+    upstreamSocket = net.connect({ host: upstreamTarget.hostname, port });
+    upstreamSocket.once("connect", () => onConnect(upstreamSocket));
+  }
 
-  upstreamReq.on("error", (err) => {
-    writeUpgradeFailure(
-      socket,
-      502,
-      "Bad Gateway",
-      proxyErrorPayload(
-        `Upstream connection failed: ${err instanceof Error ? err.message : String(err)}`,
-      ),
-    );
+  upstreamSocket.once("timeout", () => upstreamSocket.destroy());
+  upstreamSocket.once("error", (error) => {
+    if (!connected && !socket.destroyed) {
+      writeUpgradeFailure(
+        socket,
+        502,
+        "Bad Gateway",
+        proxyErrorPayload(`Upstream connection failed: ${error.message}`),
+      );
+      return;
+    }
+    if (!socket.destroyed) socket.destroy(error);
   });
-
-  upstreamReq.end();
+  upstreamSocket.once("close", () => {
+    if (!socket.destroyed) socket.destroy();
+  });
+  socket.once("error", () => upstreamSocket.destroy());
+  socket.once("close", () => upstreamSocket.destroy());
 }
 
 function imitateCodexLimitResponse(resetDateStr?: string | null): Response {
@@ -1129,12 +1308,12 @@ async function handleForward(
     return;
   }
 
-  const hash = hashApiKey(apiKey);
   if (isBudgetBypassEnabled()) {
     await proxyUpstreamHttp(req, res);
     return;
   }
 
+  const hash = hashApiKey(apiKey);
   let budget = getBudget(hash);
 
   if (!budget || !budget.enabled) {
@@ -1143,7 +1322,7 @@ async function handleForward(
   }
 
   budget = autoAdvanceWeek(budget);
-  const providerKey = providerKeyFromApiKey(apiKey);
+  const providerKey = `api-key:${hash}`;
   const spent = getCostForDateWindow(
     providerKey,
     budget.week_start_date,
@@ -1161,134 +1340,265 @@ async function handleForward(
   await proxyUpstreamHttp(req, res);
 }
 
-const handleHttpRequest: NodeHandler = async (req, res) => {
-  const url = new URL(
-    req.url || "/",
-    `http://${req.headers.host || "127.0.0.1"}`,
+async function handleForwardFetch(
+  request: Request,
+  requestTarget?: string,
+): Promise<Response> {
+  const apiKey = extractApiKeyFromAuthHeader(
+    request.headers.get("authorization") ?? undefined,
   );
-  const path = getRoutePath(url);
+  if (!apiKey) {
+    return new Response(
+      JSON.stringify({
+        error: { message: "Missing API key", type: "invalid_request_error" },
+      }),
+      {
+        status: 401,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      },
+    );
+  }
+
+  if (isBudgetBypassEnabled()) return proxyUpstreamFetch(request, requestTarget);
+
+  const hash = hashApiKey(apiKey);
+  let budget = getBudget(hash);
+  if (!budget || !budget.enabled) return imitateCodexLimitResponse();
+
+  budget = autoAdvanceWeek(budget);
+  const spent = getCostForDateWindow(
+    `api-key:${hash}`,
+    budget.week_start_date,
+    budget.next_reset_date,
+  );
+  if (spent >= budget.weekly_limit_usd) {
+    return imitateCodexLimitResponse(budget.next_reset_date);
+  }
+
+  return proxyUpstreamFetch(request, requestTarget);
+}
+
+function getUpgradeBudgetRejection(
+  path: string,
+  method: string,
+  authorization: string | null,
+): Response | null {
+  if (
+    path.startsWith("/api/") &&
+    !shouldProxyApiRequestWithoutBudgetCheck(path, method)
+  ) {
+    return new Response(
+      JSON.stringify({
+        error: { message: "Not found", type: "invalid_request_error" },
+      }),
+      { status: 404, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  if (!requiresBudgetPrecheck(path)) return null;
+
+  const apiKey = extractApiKeyFromAuthHeader(authorization ?? undefined);
+  if (!apiKey) {
+    return new Response(
+      JSON.stringify({
+        error: { message: "Missing API key", type: "invalid_request_error" },
+      }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  if (isBudgetBypassEnabled()) return null;
+
+  const hash = hashApiKey(apiKey);
+  let budget = getBudget(hash);
+  if (!budget || !budget.enabled) return imitateCodexLimitResponse();
+  budget = autoAdvanceWeek(budget);
+  const spent = getCostForDateWindow(
+    `api-key:${hash}`,
+    budget.week_start_date,
+    budget.next_reset_date,
+  );
+  return spent >= budget.weekly_limit_usd
+    ? imitateCodexLimitResponse(budget.next_reset_date)
+    : null;
+}
+
+function cloneWebSocketHeaders(headers: Headers): http.OutgoingHttpHeaders {
+  const outgoing: http.OutgoingHttpHeaders = {};
+  headers.forEach((value, key) => {
+    if (
+      key === "host" ||
+      key === "connection" ||
+      key === "upgrade" ||
+      key.startsWith("sec-websocket-")
+    ) {
+      return;
+    }
+    outgoing[key] = value;
+  });
+  return outgoing;
+}
+
+async function handleNativeUpgrade(
+  request: Request,
+  server: Bun.Server<WebSocketBridge>,
+  path: string,
+  requestTarget: string,
+): Promise<Response | undefined> {
+  const rejection = getUpgradeBudgetRejection(
+    path,
+    request.method,
+    request.headers.get("authorization"),
+  );
+  if (rejection) return rejection;
+
+  const protocols = (request.headers.get("sec-websocket-protocol") || "")
+    .split(",")
+    .map((protocol) => protocol.trim())
+    .filter(Boolean);
+  const targetProtocol = upstreamTarget.protocol === "https:" ? "wss:" : "ws:";
+  const target = `${targetProtocol}//${upstreamHost}${requestTarget}`;
+  const upstream = new BunWebSocket(target, {
+    headers: cloneWebSocketHeaders(request.headers),
+    protocols: protocols.length > 0 ? protocols : undefined,
+    perMessageDeflate: request.headers
+      .get("sec-websocket-extensions")
+      ?.toLowerCase()
+      .includes("permessage-deflate"),
+  });
+  upstream.binaryType = "arraybuffer";
+
+  const bridge: WebSocketBridge = {
+    upstream,
+    client: null,
+    pendingToClient: [],
+  };
+  upstream.addEventListener("close", (event) => {
+    if (!bridge.client) return;
+    const code = event.code >= 1000 && event.code !== 1005 ? event.code : 1011;
+    bridge.client.close(code, event.reason || "Upstream WebSocket closed");
+  });
+  upstream.addEventListener("error", () => {
+    bridge.client?.close(1011, "Upstream WebSocket error");
+  });
+  upstream.addEventListener("message", (event) => {
+    const payload = typeof event.data === "string"
+      ? event.data
+      : event.data instanceof ArrayBuffer
+        ? event.data
+        : new Uint8Array(event.data as ArrayBuffer);
+    if (bridge.client) {
+      const result = bridge.client.send(payload);
+      if (result === -1) bridge.pendingToClient.push(payload);
+    } else {
+      bridge.pendingToClient.push(payload);
+    }
+  });
+
+  const opened = await new Promise<boolean>((resolve) => {
+    const timeout = setTimeout(() => {
+      upstream.close();
+      resolve(false);
+    }, config.headersTimeoutMs);
+    upstream.addEventListener(
+      "open",
+      () => {
+        clearTimeout(timeout);
+        resolve(true);
+      },
+      { once: true },
+    );
+    upstream.addEventListener(
+      "error",
+      () => {
+        clearTimeout(timeout);
+        resolve(false);
+      },
+      { once: true },
+    );
+  });
+  if (!opened) {
+    return new Response(
+      JSON.stringify(proxyErrorPayload("Upstream WebSocket upgrade failed")),
+      { status: 502, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  const upgraded = server.upgrade(request, {
+    data: bridge,
+    headers: upstream.protocol
+      ? { "Sec-WebSocket-Protocol": upstream.protocol }
+      : undefined,
+  });
+  if (!upgraded) {
+    upstream.close();
+    return new Response(
+      JSON.stringify(proxyErrorPayload("Client WebSocket upgrade failed")),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  return undefined;
+}
+
+async function handleNativeHttpRequest(
+  request: Request,
+  server: Bun.Server<WebSocketBridge>,
+): Promise<Response | undefined> {
+  const requestTarget = getAbsoluteRequestTarget(request.url);
+  const path = getRequestPath(requestTarget);
+  const method = request.method;
+
+  if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+    return handleNativeUpgrade(request, server, path, requestTarget);
+  }
+
+  if (path.startsWith("/api/")) {
+    if (shouldProxyApiRequestWithoutBudgetCheck(path, method)) {
+      return handleForwardFetch(request, requestTarget);
+    }
+    return handleLocalApiRequest(path, method, request);
+  }
+
+  if (path === "/health") {
+    return new Response(HEALTH_BODY, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": HEALTH_BODY.length.toString(),
+        ...CORS_HEADERS,
+      },
+    });
+  }
+  if (shouldSkipBudgetPrecheck(path)) {
+    return proxyUpstreamFetch(request, requestTarget);
+  }
+  return handleForwardFetch(request, requestTarget);
+}
+
+const handleHttpRequest: NodeHandler = async (req, res) => {
+  if (isUnsafeAbsoluteRequestTarget(req.url)) {
+    markUnsafeClient(req);
+    res.shouldKeepAlive = false;
+    writeBufferResponse(res, 400, UNSAFE_REQUEST_BODY, true);
+    return;
+  }
+
+  const path = getRequestPath(req.url);
   const method = req.method || "GET";
 
   if (path.startsWith("/api/")) {
-    if (method === "OPTIONS" && isLocalApiRoute(path, "OPTIONS")) {
-      res.writeHead(204, CORS_HEADERS);
-      res.end();
-      return;
-    }
-
     if (shouldProxyApiRequestWithoutBudgetCheck(path, method)) {
       await handleForward(req, res);
       return;
     }
 
-    const webReq = createNodeRequest(req);
-
-    if (path === "/api/auth/login" && method === "POST") {
-      await writeNodeResponse(res, await handleLogin(webReq));
-      return;
-    }
-
-    if (path === "/api/public/budgets" && method === "GET") {
-      await writeNodeResponse(res, await handleListBudgets());
-      return;
-    }
-
-    const authErr = await requireAdmin(webReq);
-    if (authErr) {
-      await writeNodeResponse(res, authErr);
-      return;
-    }
-
-    if (path === "/api/budgets" && method === "GET") {
-      await writeNodeResponse(res, await handleListBudgets());
-      return;
-    }
-    if (path === "/api/budgets" && method === "POST") {
-      await writeNodeResponse(res, await handleCreateBudget(webReq));
-      return;
-    }
-    if (path === "/api/budgets/bypass" && method === "PUT") {
-      await writeNodeResponse(res, await handleUpdateBudgetBypass(webReq));
-      return;
-    }
-    if (path === "/api/budgets/window" && method === "GET") {
-      await writeNodeResponse(res, await handleGetBudgetWindow());
-      return;
-    }
-    if (path === "/api/budgets/window" && method === "PUT") {
-      await writeNodeResponse(res, await handleUpdateBudgetWindow(webReq));
-      return;
-    }
-
-    const budgetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)$/);
-    if (budgetMatch) {
-      const hash = budgetMatch[1];
-      if (method === "GET") {
-        await writeNodeResponse(res, await handleGetBudget(hash));
-        return;
-      }
-      if (method === "DELETE") {
-        await writeNodeResponse(res, await handleDeleteBudget(hash));
-        return;
-      }
-    }
-
-    const resetMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/reset-date$/);
-    if (resetMatch && method === "PUT") {
-      await writeNodeResponse(
-        res,
-        await handleUpdateResetDate(resetMatch[1], webReq),
-      );
-      return;
-    }
-
-    const rangeMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/date-range$/);
-    if (rangeMatch && method === "PUT") {
-      await writeNodeResponse(
-        res,
-        await handleUpdateBudgetDateRange(rangeMatch[1], webReq),
-      );
-      return;
-    }
-
-    const limitMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/limit$/);
-    if (limitMatch && method === "PUT") {
-      await writeNodeResponse(
-        res,
-        await handleUpdateLimit(limitMatch[1], webReq),
-      );
-      return;
-    }
-
-    const toggleMatch = path.match(/^\/api\/budgets\/([a-f0-9]+)\/enabled$/);
-    if (toggleMatch && method === "PUT") {
-      await writeNodeResponse(
-        res,
-        await handleToggleBudget(toggleMatch[1], webReq),
-      );
-      return;
-    }
-
-    const redeemMatch = path.match(/^\/api\/codex-resets\/([^/]+)\/redeem$/);
-    if (redeemMatch && method === "POST") {
-      await writeNodeResponse(
-        res,
-        await handleRedeemCodexReset(redeemMatch[1]),
-      );
-      return;
-    }
-
-    if (path === "/api/keys" && method === "GET") {
-      await writeNodeResponse(res, await handleListApiKeys());
-      return;
-    }
+    await writeNodeResponse(
+      res,
+      await handleLocalApiRequest(path, method, createNodeRequest(req)),
+    );
+    return;
   }
 
   if (path === "/health") {
-    await writeNodeResponse(
-      res,
-      ok({ status: "ok", upstream: config.upstreamUrl }),
-    );
+    writeBufferResponse(res, 200, HEALTH_BODY);
     return;
   }
 
@@ -1321,6 +1631,18 @@ const server = http.createServer((req, res) => {
   });
 });
 
+server.on("connection", (socket) => {
+  const address = socket.remoteAddress;
+  if (!address) return;
+  const expiresAt = unsafeClients.get(address);
+  if (!expiresAt) return;
+  if (expiresAt <= Date.now()) {
+    unsafeClients.delete(address);
+    return;
+  }
+  socket.destroy();
+});
+
 server.headersTimeout = config.headersTimeoutMs;
 server.keepAliveTimeout = config.keepAliveTimeoutMs;
 server.requestTimeout = 0;
@@ -1329,11 +1651,18 @@ server.maxRequestsPerSocket = 1_000;
 server.setTimeout(config.clientIdleTimeoutMs, (socket) => socket.destroy());
 
 server.on("upgrade", (req, socket, head) => {
-  const url = new URL(
-    req.url || "/",
-    `http://${req.headers.host || "127.0.0.1"}`,
-  );
-  const path = getRoutePath(url);
+  if (isUnsafeAbsoluteRequestTarget(req.url)) {
+    markUnsafeClient(req);
+    writeUpgradeFailure(socket, 400, "Bad Request", {
+      error: {
+        message: "Absolute request targets are not allowed",
+        type: "invalid_request_error",
+      },
+    });
+    return;
+  }
+
+  const path = getRequestPath(req.url);
   const method = req.method || "GET";
 
   if (path.startsWith("/api/")) {
@@ -1373,7 +1702,7 @@ server.on("upgrade", (req, socket, head) => {
         }
 
         budget = autoAdvanceWeek(budget);
-        const providerKey = providerKeyFromApiKey(apiKey);
+        const providerKey = `api-key:${hash}`;
         const spent = getCostForDateWindow(
           providerKey,
           budget.week_start_date,
@@ -1433,7 +1762,7 @@ server.on("upgrade", (req, socket, head) => {
     }
 
     budget = autoAdvanceWeek(budget);
-    const providerKey = providerKeyFromApiKey(apiKey);
+    const providerKey = `api-key:${hash}`;
     const spent = getCostForDateWindow(
       providerKey,
       budget.week_start_date,
@@ -1454,12 +1783,80 @@ server.on("upgrade", (req, socket, head) => {
   proxyUpstreamUpgrade(req, socket, head);
 });
 
-server.listen(config.port, "0.0.0.0", () => {
-  const address = server.address();
-  const port =
-    typeof address === "object" && address ? address.port : config.port;
-  console.log(`[ccs-limit] listening on :${port}`);
+if (config.nativePort > 0) {
+  Bun.serve<WebSocketBridge>({
+    hostname: "127.0.0.1",
+    port: config.nativePort,
+    idleTimeout: 0,
+    routes: { "/health": HEALTH_RESPONSE },
+    fetch: handleNativeHttpRequest,
+    websocket: {
+      open(socket) {
+        socket.data.client = socket;
+        if (socket.data.pendingToClient.length === 0) return;
+        const pending = socket.data.pendingToClient;
+        socket.data.pendingToClient = [];
+        for (let index = 0; index < pending.length; index += 1) {
+          if (socket.send(pending[index]) === -1) {
+            socket.data.pendingToClient.push(...pending.slice(index));
+            break;
+          }
+        }
+      },
+      message(socket, message) {
+        if (socket.data.upstream.readyState === WebSocket.OPEN) {
+          socket.data.upstream.send(message);
+        }
+      },
+      drain(socket) {
+        if (socket.data.pendingToClient.length === 0) return;
+        const pending = socket.data.pendingToClient;
+        socket.data.pendingToClient = [];
+        for (let index = 0; index < pending.length; index += 1) {
+          if (socket.send(pending[index]) === -1) {
+            socket.data.pendingToClient.push(...pending.slice(index));
+            break;
+          }
+        }
+      },
+      close(socket, code, reason) {
+        socket.data.client = null;
+        if (
+          socket.data.upstream.readyState === WebSocket.OPEN ||
+          socket.data.upstream.readyState === WebSocket.CONNECTING
+        ) {
+          const closeCode = code >= 1000 && code !== 1005 ? code : 1000;
+          socket.data.upstream.close(closeCode, reason);
+        }
+      },
+    },
+    error(error) {
+      return new Response(
+        JSON.stringify(
+          proxyErrorPayload(
+            `Unhandled proxy failure: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        ),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+  console.log(`[ccs-limit] native HTTP backend: 127.0.0.1:${config.nativePort}`);
+}
+
+const nodeHost = config.nativePort > 0 ? "127.0.0.1" : "0.0.0.0";
+if (config.nodePort > 0) {
+  server.listen(config.nodePort, nodeHost, () => {
+    const address = server.address();
+    const port =
+      typeof address === "object" && address ? address.port : config.nodePort;
+    console.log(`[ccs-limit] Node compatibility backend: ${nodeHost}:${port}`);
+  });
+} else {
+  console.log("[ccs-limit] Node compatibility backend: disabled");
+}
+if (config.nativePort > 0 || config.nodePort > 0) {
   console.log(`[ccs-limit] upstream: ${config.upstreamUrl}`);
   console.log(`[ccs-limit] budget db: ${config.budgetDbPath}`);
   console.log(`[ccs-limit] usage db: ${config.usageDbPath}`);
-});
+}

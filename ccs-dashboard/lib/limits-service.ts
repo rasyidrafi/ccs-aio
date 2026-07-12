@@ -69,6 +69,7 @@ type AuthFileApiEntry = {
   failed?: number
   updated_at?: string
   status?: string
+  priority?: number | string
 }
 
 type AuthFileRecord = {
@@ -76,11 +77,14 @@ type AuthFileRecord = {
   account_id?: string
   email?: string
   expired?: string
+  priority?: number | string
 }
 
 type CodexUsageWindow = {
   used_percent?: number
   usedPercent?: number
+  limit_window_seconds?: number | null
+  limitWindowSeconds?: number | null
   reset_after_seconds?: number | null
   resetAfterSeconds?: number | null
 }
@@ -142,6 +146,16 @@ type CacheEntry = {
 }
 
 let limitsCache: CacheEntry | null = null
+let limitsCacheGeneration = 0
+let limitsRefresh: {
+  generation: number
+  promise: Promise<LimitsPayload>
+} | null = null
+
+function invalidateLimitsCache() {
+  limitsCacheGeneration += 1
+  limitsCache = null
+}
 
 async function readUtf8(filePath: string): Promise<string | null> {
   try {
@@ -229,6 +243,107 @@ async function fetchManagementAuthFiles(
   } catch {
     return []
   }
+}
+
+async function fetchManagementRoutingStrategy(
+  ctx: LimitsContext
+): Promise<LimitsPayload["routingStrategy"]> {
+  try {
+    const response = await fetch(
+      `${ctx.managementUrl}/v0/management/routing/strategy`,
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${ctx.managementSecret}`,
+        },
+        cache: "no-store",
+      }
+    )
+    if (!response.ok) return "round-robin"
+
+    const body = (await response.json()) as { strategy?: unknown }
+    return body.strategy === "fill-first" ? "fill-first" : "round-robin"
+  } catch {
+    return "round-robin"
+  }
+}
+
+function parsePriority(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value)
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value.trim(), 10)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return 0
+}
+
+async function readManagementError(
+  response: Response,
+  fallback: string
+): Promise<string> {
+  const body = (await response.json().catch(() => null)) as {
+    error?: unknown
+  } | null
+  return typeof body?.error === "string" && body.error.trim()
+    ? body.error
+    : fallback
+}
+
+export async function updateCliproxyRoutingStrategy(
+  strategy: LimitsPayload["routingStrategy"]
+): Promise<void> {
+  const ctx = await resolveContext()
+  const response = await fetch(
+    `${ctx.managementUrl}/v0/management/routing/strategy`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${ctx.managementSecret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ value: strategy }),
+      cache: "no-store",
+    }
+  )
+  if (!response.ok) {
+    throw new Error(
+      await readManagementError(
+        response,
+        `CLIProxy rejected the routing update with HTTP ${response.status}`
+      )
+    )
+  }
+  invalidateLimitsCache()
+}
+
+export async function updateCliproxyAuthPriority(
+  name: string,
+  priority: number
+): Promise<void> {
+  const ctx = await resolveContext()
+  const response = await fetch(
+    `${ctx.managementUrl}/v0/management/auth-files/fields`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${ctx.managementSecret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name, priority }),
+      cache: "no-store",
+    }
+  )
+  if (!response.ok) {
+    throw new Error(
+      await readManagementError(
+        response,
+        `CLIProxy rejected the priority update with HTTP ${response.status}`
+      )
+    )
+  }
+  invalidateLimitsCache()
 }
 
 async function scanLocalCodexAuthFiles(
@@ -343,6 +458,61 @@ function resolveWindow(
   }
 }
 
+const FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60
+const WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+
+function windowDurationSeconds(
+  raw: CodexUsageWindow | undefined | null
+): number | null {
+  const value = raw?.limit_window_seconds ?? raw?.limitWindowSeconds ?? null
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : null
+}
+
+function isApproximateWindow(value: number | null, expected: number): boolean {
+  return value !== null && value >= expected * 0.95 && value <= expected * 1.05
+}
+
+function resolveQuotaWindows(
+  rateLimit:
+    | {
+        primary_window?: CodexUsageWindow
+        primaryWindow?: CodexUsageWindow
+        secondary_window?: CodexUsageWindow
+        secondaryWindow?: CodexUsageWindow
+      }
+    | null
+    | undefined,
+  labels: { fiveHour: string; weekly: string }
+): { fiveHour: LimitsQuotaWindow | null; weekly: LimitsQuotaWindow | null } {
+  const primary = rateLimit?.primary_window || rateLimit?.primaryWindow
+  const secondary = rateLimit?.secondary_window || rateLimit?.secondaryWindow
+  const windows = [primary, secondary].filter(
+    (window): window is CodexUsageWindow => Boolean(window)
+  )
+
+  let fiveHourRaw = windows.find((window) =>
+    isApproximateWindow(windowDurationSeconds(window), FIVE_HOUR_WINDOW_SECONDS)
+  )
+  let weeklyRaw = windows.find((window) =>
+    isApproximateWindow(windowDurationSeconds(window), WEEKLY_WINDOW_SECONDS)
+  )
+
+  // Older responses did not always declare the duration. Retain the legacy
+  // positional fallback only when both windows exist. A lone primary window is
+  // ambiguous and must never be mislabeled as a five-hour limit.
+  if (primary && secondary) {
+    fiveHourRaw ??= primary === weeklyRaw ? secondary : primary
+    weeklyRaw ??= secondary === fiveHourRaw ? primary : secondary
+  }
+
+  return {
+    fiveHour: resolveWindow(labels.fiveHour, fiveHourRaw),
+    weekly: resolveWindow(labels.weekly, weeklyRaw),
+  }
+}
+
 function normalizePlanType(value: string | null | undefined): string | null {
   const normalized = value?.trim().toLowerCase() ?? ""
   if (!normalized) return null
@@ -417,18 +587,16 @@ async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
     const rateLimit = payload.rate_limit || payload.rateLimit
     const additionalRateLimits =
       payload.additional_rate_limits || payload.additionalRateLimits
+    const mainWindows = resolveQuotaWindows(rateLimit, {
+      fiveHour: "5 hour",
+      weekly: "Weekly",
+    })
     return {
       planType: normalizePlanType(
         (payload.plan_type || payload.planType || null)?.toString()
       ),
-      fiveHour: resolveWindow(
-        "5 hour",
-        rateLimit?.primary_window || rateLimit?.primaryWindow
-      ),
-      weekly: resolveWindow(
-        "Weekly",
-        rateLimit?.secondary_window || rateLimit?.secondaryWindow
-      ),
+      fiveHour: mainWindows.fiveHour,
+      weekly: mainWindows.weekly,
       unusedResets: resolveUnusedResetCredits(payload),
       additionalPools: Array.isArray(additionalRateLimits)
         ? additionalRateLimits.map((entry) => {
@@ -437,18 +605,16 @@ async function fetchCodexQuota(auth: AuthFileRecord): Promise<{
               entry.limitName?.trim() ||
               "Additional"
             const rateLimit = entry.rate_limit || entry.rateLimit
+            const windows = resolveQuotaWindows(rateLimit, {
+              fiveHour: `${featureLabel} (5h)`,
+              weekly: `${featureLabel} (weekly)`,
+            })
 
             return {
               featureLabel,
               displayLabel: prettifyFeatureLabel(featureLabel),
-              fiveHour: resolveWindow(
-                `${featureLabel} (5h)`,
-                rateLimit?.primary_window || rateLimit?.primaryWindow
-              ),
-              weekly: resolveWindow(
-                `${featureLabel} (weekly)`,
-                rateLimit?.secondary_window || rateLimit?.secondaryWindow
-              ),
+              fiveHour: windows.fiveHour,
+              weekly: windows.weekly,
             }
           })
         : [],
@@ -510,16 +676,17 @@ function sortAccounts(accounts: LimitsAccountRow[]): LimitsAccountRow[] {
   })
 }
 
-export async function getLimitsPayload(
-  forceRefresh = false
-): Promise<LimitsPayload> {
-  if (!forceRefresh && limitsCache && limitsCache.expiresAt > Date.now()) {
-    return limitsCache.payload
-  }
-
+async function loadLimitsPayload(): Promise<LimitsPayload> {
   const ctx = await resolveContext()
-  const discovered = await fetchManagementAuthFiles(ctx)
-  const [activeEntries, pausedEntries, pausedTokenFiles] = await Promise.all([
+  const [
+    discovered,
+    routingStrategy,
+    activeEntries,
+    pausedEntries,
+    pausedTokenFiles,
+  ] = await Promise.all([
+    fetchManagementAuthFiles(ctx),
+    fetchManagementRoutingStrategy(ctx),
     scanLocalCodexAuthFiles(ctx.authDir, "active"),
     scanLocalCodexAuthFiles(ctx.pausedAuthDir, "paused"),
     readPausedTokenFiles(ctx.accountsRegistryPath),
@@ -548,6 +715,7 @@ export async function getLimitsPayload(
           planType: null,
           status: "error",
           sourceLabel,
+          priority: parsePriority(entry.priority),
           successCount: entry.success ?? 0,
           failureCount: entry.failed ?? 0,
           updatedAt: entry.updated_at ?? null,
@@ -568,6 +736,7 @@ export async function getLimitsPayload(
           planType: null,
           status: "expired",
           sourceLabel,
+          priority: parsePriority(entry.priority ?? auth.priority),
           successCount: entry.success ?? 0,
           failureCount: entry.failed ?? 0,
           updatedAt: entry.updated_at ?? null,
@@ -593,6 +762,7 @@ export async function getLimitsPayload(
           planType: quota.planType,
           status,
           sourceLabel,
+          priority: parsePriority(entry.priority ?? auth.priority),
           successCount: entry.success ?? 0,
           failureCount: entry.failed ?? 0,
           updatedAt: entry.updated_at ?? null,
@@ -620,6 +790,7 @@ export async function getLimitsPayload(
           planType: null,
           status: "error",
           sourceLabel,
+          priority: parsePriority(entry.priority ?? auth.priority),
           successCount: entry.success ?? 0,
           failureCount: entry.failed ?? 0,
           updatedAt: entry.updated_at ?? null,
@@ -641,6 +812,7 @@ export async function getLimitsPayload(
   )
   const payload: LimitsPayload = {
     generatedAt: new Date().toISOString(),
+    routingStrategy,
     summary: {
       totalAccounts: sortedAccounts.length,
       activeAccounts: sortedAccounts.filter(
@@ -655,10 +827,43 @@ export async function getLimitsPayload(
     accounts: sortedAccounts,
   }
 
-  limitsCache = {
-    expiresAt: Date.now() + LIMITS_CACHE_TTL_MS,
-    payload,
+  return payload
+}
+
+export async function getLimitsPayload(
+  forceRefresh = false
+): Promise<LimitsPayload> {
+  if (forceRefresh) invalidateLimitsCache()
+
+  if (!forceRefresh && limitsCache && limitsCache.expiresAt > Date.now()) {
+    return limitsCache.payload
   }
 
-  return payload
+  // Never serve an expired payload. Concurrent requests wait for the same
+  // refresh so multiple domains or tabs do not multiply Codex quota calls.
+  if (limitsRefresh?.generation === limitsCacheGeneration) {
+    return limitsRefresh.promise
+  }
+
+  const generation = limitsCacheGeneration
+  const promise = loadLimitsPayload()
+    .then((payload) => {
+      if (limitsCacheGeneration === generation) {
+        limitsCache = {
+          expiresAt: Date.now() + LIMITS_CACHE_TTL_MS,
+          payload,
+        }
+      }
+      return payload
+    })
+    .finally(() => {
+      if (limitsRefresh?.promise === promise) limitsRefresh = null
+    })
+
+  limitsRefresh = { generation, promise }
+  return promise
+}
+
+export async function refreshLimitsPayload(): Promise<LimitsPayload> {
+  return getLimitsPayload(true)
 }

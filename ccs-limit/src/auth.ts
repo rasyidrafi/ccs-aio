@@ -1,6 +1,13 @@
 import { config } from "./config";
 
 const encoder = new TextEncoder();
+const signingKey = crypto.subtle.importKey(
+  "raw",
+  encoder.encode(config.jwtSecret),
+  { name: "HMAC", hash: "SHA-256" },
+  false,
+  ["sign"],
+);
 
 function base64url(data: Uint8Array | string): string {
   const bytes = typeof data === "string" ? encoder.encode(data) : data;
@@ -18,13 +25,15 @@ function base64urlDecode(s: string): Uint8Array {
 }
 
 async function hmacSign(data: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const key = secret === config.jwtSecret
+    ? await signingKey
+    : await crypto.subtle.importKey(
+        "raw",
+        encoder.encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
   const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(data));
   return base64url(new Uint8Array(sig));
 }

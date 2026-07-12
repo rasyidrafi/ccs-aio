@@ -33,22 +33,29 @@ function readEnvFile(): Record<string, string> {
 const rawEnv = readEnvFile();
 
 function readPositiveNumber(key: string, fallback: number): number {
-  const value = Number(rawEnv[key] || process.env[key]);
+  const value = Number(process.env[key] || rawEnv[key]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+function readPort(key: string, fallback: number): number {
+  const value = Number(process.env[key] || rawEnv[key]);
+  return Number.isInteger(value) && value >= 0 && value <= 65_535
+    ? value
+    : fallback;
+}
+
 export const config = {
-  port: Number(rawEnv.PORT || process.env.PORT) || 8098,
-  upstreamUrl: rawEnv.UPSTREAM_URL || process.env.UPSTREAM_URL || "http://127.0.0.1:8097",
-  jwtSecret: rawEnv.JWT_SECRET || process.env.JWT_SECRET || "change-me",
-  adminUsername: rawEnv.ADMIN_USERNAME || process.env.ADMIN_USERNAME || "admin",
-  adminPassword: rawEnv.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || "admin",
+  port: Number(process.env.PORT || rawEnv.PORT) || 8098,
+  upstreamUrl: process.env.UPSTREAM_URL || rawEnv.UPSTREAM_URL || "http://127.0.0.1:8097",
+  jwtSecret: process.env.JWT_SECRET || rawEnv.JWT_SECRET || "change-me",
+  adminUsername: process.env.ADMIN_USERNAME || rawEnv.ADMIN_USERNAME || "admin",
+  adminPassword: process.env.ADMIN_PASSWORD || rawEnv.ADMIN_PASSWORD || "admin",
   usageDbPath: resolvePath(
-    rawEnv.USAGE_DB_PATH || process.env.USAGE_DB_PATH ||
+    process.env.USAGE_DB_PATH || rawEnv.USAGE_DB_PATH ||
       path.join(homedir(), ".ccs-dashboard", "data", "usage-v2.db")
   ),
   cliproxyConfigDir: resolvePath(
-    rawEnv.CLIPROXY_CONFIG_DIR || process.env.CLIPROXY_CONFIG_DIR ||
+    process.env.CLIPROXY_CONFIG_DIR || rawEnv.CLIPROXY_CONFIG_DIR ||
       path.join(homedir(), ".ccs", "cliproxy")
   ),
   budgetDbPath: path.join(
@@ -61,4 +68,7 @@ export const config = {
   clientIdleTimeoutMs: readPositiveNumber("CLIENT_IDLE_TIMEOUT_MS", 300_000),
   headersTimeoutMs: readPositiveNumber("HEADERS_TIMEOUT_MS", 15_000),
   keepAliveTimeoutMs: readPositiveNumber("KEEP_ALIVE_TIMEOUT_MS", 5_000),
+  unsafeClientBlockMs: readPositiveNumber("UNSAFE_CLIENT_BLOCK_MS", 300_000),
+  nativePort: readPort("NATIVE_PORT", 0),
+  nodePort: readPort("NODE_PORT", Number(process.env.PORT || rawEnv.PORT) || 8098),
 };

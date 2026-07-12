@@ -132,6 +132,7 @@ export interface LimitsAccountRow {
   planType: string | null
   status: "active" | "paused" | "expired" | "error"
   sourceLabel: string
+  priority: number
   successCount: number
   failureCount: number
   updatedAt: string | null
@@ -145,6 +146,7 @@ export interface LimitsAccountRow {
 
 export interface LimitsPayload {
   generatedAt: string
+  routingStrategy: "round-robin" | "fill-first"
   summary: {
     totalAccounts: number
     activeAccounts: number

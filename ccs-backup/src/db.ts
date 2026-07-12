@@ -141,6 +141,8 @@ function createSchema(db: Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_raw_usage_events_timestamp_ms ON raw_usage_events (timestamp_ms);
     CREATE INDEX IF NOT EXISTS idx_raw_usage_events_provider_key ON raw_usage_events (provider_key);
+    DROP INDEX IF EXISTS idx_raw_usage_events_provider_timestamp;
+    CREATE INDEX IF NOT EXISTS idx_raw_usage_events_provider_timestamp_cost ON raw_usage_events (provider_key, timestamp_ms, cost);
     CREATE INDEX IF NOT EXISTS idx_raw_usage_events_model ON raw_usage_events (model);
 
     CREATE TABLE IF NOT EXISTS rollup_hourly (
@@ -180,6 +182,8 @@ function createSchema(db: Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_rollup_daily_bucket_start ON rollup_daily (bucket_start);
+    DROP INDEX IF EXISTS idx_rollup_daily_provider_bucket;
+    CREATE INDEX IF NOT EXISTS idx_rollup_daily_provider_bucket_cost ON rollup_daily (provider_key, bucket_start, cost);
 
     CREATE TABLE IF NOT EXISTS rollup_monthly (
       bucket_start TEXT NOT NULL,

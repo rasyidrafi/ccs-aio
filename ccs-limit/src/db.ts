@@ -4,6 +4,12 @@ import { mkdirSync, existsSync } from "node:fs";
 import path from "node:path";
 
 let db: Database | null = null;
+let cachedWindow: BudgetWindow | null = null;
+let cachedBypassEnabled: boolean | null = null;
+let cachedActiveBypassSession: BudgetBypassSession | null | undefined;
+let cachedBudgets: Map<string, BudgetRow> | null = null;
+let cachedToday = "";
+let cachedTodayExpiresAt = 0;
 
 export function getBudgetDb(): Database {
   if (db) return db;
@@ -145,10 +151,16 @@ function writeBudgetWindow(d: Database, window: BudgetWindow): void {
 }
 
 function readBudgetBypassEnabled(d: Database): boolean {
-  return readSetting(d, "bypass_limit_enabled") === "true";
+  if (cachedBypassEnabled !== null) return cachedBypassEnabled;
+  cachedBypassEnabled = readSetting(d, "bypass_limit_enabled") === "true";
+  return cachedBypassEnabled;
 }
 
 function readActiveBudgetBypassSession(d: Database): BudgetBypassSession | null {
+  if (cachedActiveBypassSession !== undefined) {
+    return cachedActiveBypassSession;
+  }
+
   const active = d
     .query(
       `SELECT id, started_at, ended_at
@@ -159,17 +171,22 @@ function readActiveBudgetBypassSession(d: Database): BudgetBypassSession | null 
     )
     .get() as BudgetBypassSession | null;
 
-  if (active) return active;
+  if (active) {
+    cachedActiveBypassSession = active;
+    return active;
+  }
 
   const bypassSetting = readSettingRow(d, "bypass_limit_enabled");
   if (bypassSetting?.value === "true") {
-    return {
+    cachedActiveBypassSession = {
       id: null,
       started_at: bypassSetting.updated_at,
       ended_at: null,
     };
+    return cachedActiveBypassSession;
   }
 
+  cachedActiveBypassSession = null;
   return null;
 }
 
@@ -226,7 +243,17 @@ export function setBudgetBypassEnabled(
     );
   }
 
+  cachedBypassEnabled = enabled;
+  cachedActiveBypassSession = enabled ? undefined : null;
   const nextActiveSession = enabled ? readActiveBudgetBypassSession(d) : null;
+  if (cachedWindow) {
+    cachedWindow = {
+      ...cachedWindow,
+      bypass_limit_enabled: enabled,
+      bypass_session_started_at: nextActiveSession?.started_at ?? null,
+      bypass_session_ended_at: null,
+    };
+  }
   return { enabled, activeSession: nextActiveSession };
 }
 
@@ -242,11 +269,24 @@ function syncBudgetsToWindow(d: Database, window: BudgetWindow): void {
       window.next_reset_date,
     ],
   );
+
+  if (cachedBudgets) {
+    const budgets = d.query("SELECT * FROM budgets").all() as BudgetRow[];
+    cachedBudgets = new Map(
+      budgets.map((budget) => [budget.api_key_hash, budget]),
+    );
+  }
 }
 
 export function getBudgetWindow(): BudgetWindow {
   const d = getBudgetDb();
-  let window = readBudgetWindow(d);
+  const today = todayDate();
+  if (cachedWindow && today < cachedWindow.next_reset_date) {
+    return cachedWindow;
+  }
+
+  let window = cachedWindow ?? readBudgetWindow(d);
+  let windowChanged = false;
 
   if (!window) {
     const existing = d
@@ -262,11 +302,11 @@ export function getBudgetWindow(): BudgetWindow {
       bypass_session_ended_at: null,
     };
     writeBudgetWindow(d, window);
+    windowChanged = true;
   }
 
   let weekStart = window.week_start_date;
   let nextReset = window.next_reset_date;
-  const today = todayDate();
   while (today >= nextReset) {
     weekStart = nextReset;
     nextReset = addDays(nextReset, 7);
@@ -284,10 +324,14 @@ export function getBudgetWindow(): BudgetWindow {
     advanced.next_reset_date !== window.next_reset_date
   ) {
     writeBudgetWindow(d, advanced);
+    windowChanged = true;
   }
 
-  syncBudgetsToWindow(d, advanced);
-  return advanced;
+  if (windowChanged) {
+    syncBudgetsToWindow(d, advanced);
+  }
+  cachedWindow = advanced;
+  return cachedWindow;
 }
 
 export function setBudgetWindow(
@@ -304,24 +348,44 @@ export function setBudgetWindow(
   };
   writeBudgetWindow(d, window);
   syncBudgetsToWindow(d, window);
-  return window;
+  cachedWindow = window;
+  return cachedWindow;
+}
+
+function getBudgetCache(d: Database): Map<string, BudgetRow> {
+  if (cachedBudgets) return cachedBudgets;
+  const budgets = d.query("SELECT * FROM budgets").all() as BudgetRow[];
+  cachedBudgets = new Map(
+    budgets.map((budget) => [budget.api_key_hash, budget]),
+  );
+  return cachedBudgets;
+}
+
+function cacheBudgetRow(d: Database, hash: string): BudgetRow | null {
+  const row = d
+    .query("SELECT * FROM budgets WHERE api_key_hash = ?")
+    .get(hash) as BudgetRow | null;
+  const budgets = getBudgetCache(d);
+  if (row) {
+    budgets.set(hash, row);
+  } else {
+    budgets.delete(hash);
+  }
+  return row;
 }
 
 export function getAllBudgets(): BudgetRow[] {
   getBudgetWindow();
   const d = getBudgetDb();
-  return d
-    .query("SELECT * FROM budgets ORDER BY created_at DESC")
-    .all() as BudgetRow[];
+  return [...getBudgetCache(d).values()].sort((a, b) =>
+    b.created_at.localeCompare(a.created_at),
+  );
 }
 
 export function getBudget(hash: string): BudgetRow | null {
   getBudgetWindow();
   const d = getBudgetDb();
-  const rows = d
-    .query("SELECT * FROM budgets WHERE api_key_hash = ?")
-    .all(hash) as BudgetRow[];
-  return rows[0] ?? null;
+  return getBudgetCache(d).get(hash) ?? null;
 }
 
 export function upsertBudget(
@@ -348,7 +412,7 @@ export function upsertBudget(
       enabled ? 1 : 0,
     ],
   );
-  return getBudget(hash)!;
+  return cacheBudgetRow(d, hash)!;
 }
 
 export function updateResetDate(
@@ -359,7 +423,7 @@ export function updateResetDate(
   if (!existing) return null;
 
   setBudgetWindow(existing.week_start_date, nextResetDate);
-  return getBudget(hash);
+  return cacheBudgetRow(getBudgetDb(), hash);
 }
 
 export function updateBudgetDateRange(
@@ -371,7 +435,7 @@ export function updateBudgetDateRange(
   if (!existing) return null;
 
   setBudgetWindow(weekStartDate, nextResetDate);
-  return getBudget(hash);
+  return cacheBudgetRow(getBudgetDb(), hash);
 }
 
 export function setBudgetEnabled(
@@ -386,7 +450,7 @@ export function setBudgetEnabled(
     `UPDATE budgets SET enabled = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
     [enabled ? 1 : 0, hash],
   );
-  return getBudget(hash);
+  return cacheBudgetRow(d, hash);
 }
 
 export function updateLimit(hash: string, limitUsd: number): BudgetRow | null {
@@ -398,12 +462,13 @@ export function updateLimit(hash: string, limitUsd: number): BudgetRow | null {
     `UPDATE budgets SET weekly_limit_usd = ?, updated_at = datetime('now') WHERE api_key_hash = ?`,
     [limitUsd, hash],
   );
-  return getBudget(hash);
+  return cacheBudgetRow(d, hash);
 }
 
 export function deleteBudget(hash: string): boolean {
   const d = getBudgetDb();
   const result = d.run("DELETE FROM budgets WHERE api_key_hash = ?", [hash]);
+  if (result.changes > 0) cachedBudgets?.delete(hash);
   return result.changes > 0;
 }
 
@@ -421,11 +486,16 @@ export function autoAdvanceWeek(budget: BudgetRow): BudgetRow {
 }
 
 export function todayDate(): string {
-  const d = new Date();
+  const now = Date.now();
+  if (now < cachedTodayExpiresAt) return cachedToday;
+
+  const d = new Date(now);
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  cachedToday = `${year}-${month}-${day}`;
+  cachedTodayExpiresAt = new Date(year, d.getMonth(), d.getDate() + 1).getTime();
+  return cachedToday;
 }
 
 export function addDays(dateStr: string, days: number): string {

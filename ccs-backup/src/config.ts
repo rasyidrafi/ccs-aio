@@ -1,8 +1,8 @@
-import { homedir } from 'node:os';
-import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { homedir } from "node:os";
+import path from "node:path";
+import { readFile } from "node:fs/promises";
 
-const DEFAULT_MANAGEMENT_SECRET = 'ccs';
+const DEFAULT_MANAGEMENT_SECRET = "ccs";
 const DEFAULT_PORT = 8097;
 
 export interface ResolvedConfig {
@@ -14,25 +14,29 @@ export interface ResolvedConfig {
 }
 
 function expandHome(input: string): string {
-  if (input === '~') return homedir();
-  if (input.startsWith('~/')) return path.join(homedir(), input.slice(2));
+  if (input === "~") return homedir();
+  if (input.startsWith("~/")) return path.join(homedir(), input.slice(2));
   return input;
 }
 
 export function resolveCcsDir(input?: string): string {
-  return path.resolve(expandHome(input ?? path.join(homedir(), '.ccs')));
+  return path.resolve(expandHome(input ?? path.join(homedir(), ".ccs")));
 }
 
 export function resolveStateDir(input?: string): string {
-  return path.resolve(expandHome(input ?? path.join(homedir(), '.ccs-dashboard')));
+  return path.resolve(
+    expandHome(input ?? path.join(homedir(), ".ccs-dashboard")),
+  );
 }
 
 export function resolveDbPath(stateDir: string, input?: string): string {
-  return path.resolve(expandHome(input ?? path.join(stateDir, 'data', 'usage-v2.db')));
+  return path.resolve(
+    expandHome(input ?? path.join(stateDir, "data", "usage-v2.db")),
+  );
 }
 
 async function readUtf8(filePath: string): Promise<string> {
-  return await readFile(filePath, 'utf8');
+  return await readFile(filePath, "utf8");
 }
 
 function matchSingle(text: string, pattern: RegExp): string | null {
@@ -41,15 +45,18 @@ function matchSingle(text: string, pattern: RegExp): string | null {
 }
 
 function matchBlock(text: string, blockName: string): string | null {
-  const escaped = blockName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(`(?:^|\\n)${escaped}:\\s*\\n((?:[ \\t].*\\n?)*)`, 'm');
+  const escaped = blockName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(
+    `(?:^|\\n)${escaped}:\\s*\\n((?:[ \\t].*\\n?)*)`,
+    "m",
+  );
   const match = regex.exec(text);
   return match?.[1] ?? null;
 }
 
 function parsePortFromConfig(text: string): number {
-  const localBlock = matchBlock(text, 'cliproxy_server');
-  const localPortBlock = localBlock ? matchBlock(localBlock, 'local') : null;
+  const localBlock = matchBlock(text, "cliproxy_server");
+  const localPortBlock = localBlock ? matchBlock(localBlock, "local") : null;
   const portValue =
     (localPortBlock ? matchSingle(localPortBlock, /port:\s*([0-9]+)/) : null) ??
     matchSingle(text, /(?:^|\n)port:\s*([0-9]+)/m);
@@ -58,19 +65,27 @@ function parsePortFromConfig(text: string): number {
 }
 
 function parseManagementSecret(text: string): string {
-  const cliproxyBlock = matchBlock(text, 'cliproxy');
-  const authBlock = cliproxyBlock ? matchBlock(cliproxyBlock, 'auth') : null;
+  const cliproxyBlock = matchBlock(text, "cliproxy");
+  const authBlock = cliproxyBlock
+    ? (/(?:^|\n)[ \t]{2}auth:\s*\n((?:[ \t]{4}.*(?:\n|$))*)/m.exec(
+        cliproxyBlock,
+      )?.[1] ?? null)
+    : null;
   return (
-    (authBlock ? matchSingle(authBlock, /management_secret:\s*["']?([^"'\n#]+)["']?/) : null) ??
-    DEFAULT_MANAGEMENT_SECRET
+    (authBlock
+      ? matchSingle(authBlock, /management_secret:\s*["']?([^"'\n#]+)["']?/)
+      : null) ?? DEFAULT_MANAGEMENT_SECRET
   );
 }
 
-export async function resolveConfig(ccsDirInput?: string, dbPathInput?: string): Promise<ResolvedConfig> {
+export async function resolveConfig(
+  ccsDirInput?: string,
+  dbPathInput?: string,
+): Promise<ResolvedConfig> {
   const ccsDir = resolveCcsDir(ccsDirInput);
   const stateDir = resolveStateDir();
   const dbPath = resolveDbPath(stateDir, dbPathInput);
-  const configPath = path.join(ccsDir, 'config.yaml');
+  const configPath = path.join(ccsDir, "config.yaml");
 
   let managementSecret = DEFAULT_MANAGEMENT_SECRET;
   let port = DEFAULT_PORT;
@@ -87,7 +102,8 @@ export async function resolveConfig(ccsDirInput?: string, dbPathInput?: string):
     ccsDir,
     stateDir,
     dbPath,
-    managementSecret,
+    managementSecret:
+      process.env.CLIPROXY_MANAGEMENT_SECRET?.trim() || managementSecret,
     managementUrl: `http://127.0.0.1:${port}`,
   };
 }

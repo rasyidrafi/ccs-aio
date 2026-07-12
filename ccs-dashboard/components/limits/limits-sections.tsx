@@ -1,7 +1,13 @@
 "use client"
 
-import { Fragment } from "react"
-import { Activity, AlertTriangle, RefreshCw } from "lucide-react"
+import { Fragment, useMemo, useState } from "react"
+import {
+  Activity,
+  AlertTriangle,
+  LoaderCircle,
+  RefreshCw,
+  Save,
+} from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
@@ -26,7 +32,16 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Progress, ProgressLabel } from "@/components/ui/progress"
+import { Input } from "@/components/ui/input"
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+} from "@/components/ui/select"
 import {
   Table,
   TableBody,
@@ -141,7 +156,7 @@ function QuotaCell({
       </Progress>
       <div className="text-xs text-muted-foreground">
         {remaining === null || used === null
-          ? "No live window"
+          ? "Not currently applied"
           : `Used ${Math.round(used)}%, resets in ${formatRelativeSeconds(resetAfterSeconds)}`}
       </div>
     </div>
@@ -160,7 +175,7 @@ function UsagePredictionCell({
 
   if (!prediction) {
     return (
-      <div className="min-w-[190px] text-xs text-muted-foreground">
+      <div className="text-xs text-muted-foreground">
         Prediction unavailable
       </div>
     )
@@ -169,7 +184,7 @@ function UsagePredictionCell({
   const hasDailySurplus = prediction.dailyBalancePercent >= 0
 
   return (
-    <div className="min-w-[190px] text-xs tabular-nums">
+    <div className="text-xs tabular-nums">
       <div
         className={cn(
           "font-medium",
@@ -336,6 +351,59 @@ function RedeemAction({
   )
 }
 
+function PriorityEditor({
+  account,
+  adminUnlocked,
+  saving,
+  onSave,
+}: {
+  account: LimitsAccountRow
+  adminUnlocked: boolean
+  saving: boolean
+  onSave: (accountId: string, priority: number) => Promise<void>
+}) {
+  const [value, setValue] = useState(String(account.priority))
+
+  if (!adminUnlocked) {
+    return <span className="tabular-nums">{account.priority}</span>
+  }
+
+  const parsed = Number(value)
+  const valid = Number.isInteger(parsed)
+  const changed = valid && parsed !== account.priority
+
+  return (
+    <div className="flex items-center justify-center gap-1.5">
+      <Input
+        type="number"
+        step={1}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        className="h-8 w-20 text-center tabular-nums"
+        aria-label={`Priority for ${account.displayName}`}
+      />
+      <Button
+        type="button"
+        size="icon-sm"
+        variant="outline"
+        disabled={!changed || saving}
+        aria-label={`Save priority for ${account.displayName}`}
+        title="Save priority"
+        onClick={() => {
+          if (!valid) return
+          void onSave(account.id, parsed)
+        }}
+      >
+        {saving ? (
+          <LoaderCircle className="size-3.5 animate-spin" />
+        ) : (
+          <Save className="size-3.5" />
+        )}
+      </Button>
+    </div>
+  )
+}
+
 function InlineNotePill({ children }: { children: string }) {
   return (
     <span className="inline-flex items-center rounded-md border border-border/60 bg-muted/80 px-1.5 py-0.5 font-mono text-[0.75em] leading-none text-foreground shadow-sm dark:border-border/50 dark:bg-muted/40">
@@ -373,17 +441,55 @@ export function AlertsPanel({
 
 export function LimitsTable({
   limits,
+  routingStrategy,
   refreshing,
   adminUnlocked,
+  savingRoutingStrategy,
+  savingPriorityAccountId,
   redeemingAccountId,
+  onRoutingStrategyChange,
+  onPriorityChange,
   onRedeem,
 }: {
   limits: LimitsPayload
+  routingStrategy: LimitsPayload["routingStrategy"]
   refreshing: boolean
   adminUnlocked: boolean
+  savingRoutingStrategy: boolean
+  savingPriorityAccountId: string | null
   redeemingAccountId: string | null
+  onRoutingStrategyChange: (strategy: LimitsPayload["routingStrategy"]) => void
+  onPriorityChange: (accountId: string, priority: number) => Promise<void>
   onRedeem: (accountId: string) => void
 }) {
+  const [fillFirstSortBy, setFillFirstSortBy] = useState<
+    "remaining" | "priority"
+  >("priority")
+  const sortBy =
+    routingStrategy === "fill-first" ? fillFirstSortBy : "remaining"
+
+  const sortedAccounts = useMemo(() => {
+    return [...limits.accounts].sort((left, right) => {
+      if (sortBy === "priority") {
+        if (right.priority !== left.priority) {
+          return right.priority - left.priority
+        }
+      } else {
+        const weeklyDifference =
+          (right.weekly?.remainingPercent ?? -1) -
+          (left.weekly?.remainingPercent ?? -1)
+        if (weeklyDifference !== 0) return weeklyDifference
+
+        const fiveHourDifference =
+          (right.fiveHour?.remainingPercent ?? -1) -
+          (left.fiveHour?.remainingPercent ?? -1)
+        if (fiveHourDifference !== 0) return fiveHourDifference
+      }
+
+      return left.displayName.localeCompare(right.displayName)
+    })
+  }, [limits.accounts, routingStrategy, sortBy])
+
   return (
     <Card
       className={cn(
@@ -393,15 +499,93 @@ export function LimitsTable({
     >
       {refreshing ? <RefreshScrim /> : null}
       <CardHeader>
-        <CardDescription>Registered accounts</CardDescription>
-        <CardTitle>Quota runway</CardTitle>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <CardDescription>Registered accounts</CardDescription>
+            <CardTitle>Quota runway</CardTitle>
+          </div>
+          <div className="flex w-full flex-col gap-3 sm:flex-row lg:w-auto">
+            <div className="flex min-w-48 flex-1 flex-col gap-2">
+              <span className="text-sm font-medium">Routing strategy</span>
+              {adminUnlocked ? (
+                <Select
+                  value={routingStrategy}
+                  disabled={savingRoutingStrategy}
+                  onValueChange={(value: string | null) => {
+                    if (value === "round-robin" || value === "fill-first") {
+                      setFillFirstSortBy("priority")
+                      onRoutingStrategyChange(value)
+                    }
+                  }}
+                >
+                  <SelectTrigger>
+                    <span className="truncate">
+                      {savingRoutingStrategy
+                        ? "Saving..."
+                        : routingStrategy === "fill-first"
+                          ? "Fill First"
+                          : "Round Robin"}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectLabel>Routing strategy</SelectLabel>
+                      <SelectItem value="round-robin">Round Robin</SelectItem>
+                      <SelectItem value="fill-first">Fill First</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <div className="flex h-9 items-center">
+                  <Badge variant="outline">
+                    {routingStrategy === "fill-first"
+                      ? "Fill First"
+                      : "Round Robin"}
+                  </Badge>
+                </div>
+              )}
+            </div>
+            {routingStrategy === "fill-first" ? (
+              <div className="flex min-w-52 flex-1 flex-col gap-2">
+                <span className="text-sm font-medium">Order rows by</span>
+                <Select
+                  value={sortBy}
+                  onValueChange={(value: string | null) => {
+                    if (value === "remaining" || value === "priority") {
+                      setFillFirstSortBy(value)
+                    }
+                  }}
+                >
+                  <SelectTrigger>
+                    <span className="truncate">
+                      {sortBy === "priority"
+                        ? "Highest priority first"
+                        : "Most remaining quota"}
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectLabel>Ordering</SelectLabel>
+                      <SelectItem value="remaining">
+                        Most remaining quota
+                      </SelectItem>
+                      <SelectItem value="priority">
+                        Highest priority first
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
+          </div>
+        </div>
       </CardHeader>
       <CardContent className="min-h-0 flex-1">
         <ScrollArea className="h-full rounded-lg border border-border/70">
-          <Table className="min-w-[1640px]">
+          <Table className="min-w-[1760px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                <TableHead className="sticky top-0 z-10 bg-card text-center">
+                <TableHead className="sticky top-0 z-10 w-[144px] max-w-[144px] bg-card text-center">
                   No
                 </TableHead>
                 <TableHead className="sticky top-0 z-10 bg-card">
@@ -426,6 +610,9 @@ export function LimitsTable({
                 <TableHead className="sticky top-0 z-10 w-[96px] bg-card text-center">
                   Unused Resets
                 </TableHead>
+                <TableHead className="sticky top-0 z-10 w-[132px] bg-card text-center">
+                  Priority
+                </TableHead>
                 <TableHead className="sticky top-0 z-10 w-[96px] bg-card text-center">
                   Action
                 </TableHead>
@@ -444,14 +631,14 @@ export function LimitsTable({
               {limits.accounts.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={13}
+                    colSpan={14}
                     className="h-32 text-center text-sm text-muted-foreground"
                   >
                     No Codex accounts were discovered.
                   </TableCell>
                 </TableRow>
               ) : (
-                limits.accounts.map((account, index) => {
+                sortedAccounts.map((account, index) => {
                   const sparkPool = isProPlan(account.planType)
                     ? getSparkPool(account)
                     : undefined
@@ -526,7 +713,7 @@ export function LimitsTable({
                             }
                           />
                         </TableCell>
-                        <TableCell className="text-center">
+                        <TableCell className="w-[144px] max-w-[144px] text-center">
                           <UsagePredictionCell
                             used={account.weekly?.usedPercent ?? null}
                             resetAfterSeconds={
@@ -561,6 +748,18 @@ export function LimitsTable({
                           {account.unusedResets === null
                             ? "Unknown"
                             : formatNumber(account.unusedResets)}
+                        </TableCell>
+                        <TableCell
+                          rowSpan={rowSpan}
+                          className="w-[132px] text-center"
+                        >
+                          <PriorityEditor
+                            key={`${account.id}:${account.priority}`}
+                            account={account}
+                            adminUnlocked={adminUnlocked}
+                            saving={savingPriorityAccountId === account.id}
+                            onSave={onPriorityChange}
+                          />
                         </TableCell>
                         <TableCell
                           rowSpan={rowSpan}
@@ -618,7 +817,7 @@ export function LimitsTable({
                               }
                             />
                           </TableCell>
-                          <TableCell className="text-center">
+                          <TableCell className="w-[144px] max-w-[144px] text-center">
                             <UsagePredictionCell
                               used={sparkPool.weekly?.usedPercent ?? null}
                               resetAfterSeconds={

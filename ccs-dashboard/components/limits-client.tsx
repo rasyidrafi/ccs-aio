@@ -21,9 +21,10 @@ import {
 } from "@/components/limits/limits-sections"
 import { formatNumber } from "@/components/limits/limits-utils"
 import { CCS_LIMIT_URL } from "@/components/budgets/budgets-utils"
+import { LimitsPageSkeleton } from "@/components/limits/limits-loading"
 import type { LimitsPayload } from "@/lib/types"
 
-export { LimitsPageSkeleton } from "@/components/limits/limits-loading"
+export { LimitsPageSkeleton }
 
 const LIMITS_AUTH_STORAGE_KEY = "ccs-dashboard:budgets-auth"
 const FALLBACK_SESSION_TTL_MS = 24 * 60 * 60 * 1000
@@ -110,6 +111,10 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
   const [redeemingAccountId, setRedeemingAccountId] = useState<string | null>(
     null
   )
+  const [savingRoutingStrategy, setSavingRoutingStrategy] = useState(false)
+  const [savingPriorityAccountId, setSavingPriorityAccountId] = useState<
+    string | null
+  >(null)
   const isRefreshing = isPending
 
   const healthyCount = useMemo(
@@ -156,7 +161,9 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
       })
       const data = (await resp.json().catch(() => null)) as unknown
       if (!resp.ok) {
-        setLoginError(getApiError(data, `Login failed with HTTP ${resp.status}`))
+        setLoginError(
+          getApiError(data, `Login failed with HTTP ${resp.status}`)
+        )
         return
       }
 
@@ -219,6 +226,67 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
       setRedeemingAccountId(null)
     }
   }
+
+  async function updateRouting(body: Record<string, unknown>) {
+    if (!adminToken) throw new Error("Unlock admin mode first.")
+
+    const response = await fetch("/api/limits/routing", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify(body),
+    })
+    const data = (await response.json().catch(() => null)) as unknown
+    if (response.status === 401) {
+      clearSession()
+      throw new Error("Session expired. Unlock admin mode again.")
+    }
+    if (!response.ok) {
+      throw new Error(
+        getApiError(data, `Routing update failed with HTTP ${response.status}`)
+      )
+    }
+  }
+
+  async function handleRoutingStrategyChange(
+    strategy: LimitsPayload["routingStrategy"]
+  ) {
+    setActionError(null)
+    setSavingRoutingStrategy(true)
+    try {
+      await updateRouting({ action: "strategy", strategy })
+      handleRefresh()
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Routing update failed"
+      )
+    } finally {
+      setSavingRoutingStrategy(false)
+    }
+  }
+
+  async function handlePriorityChange(accountId: string, priority: number) {
+    setActionError(null)
+    setSavingPriorityAccountId(accountId)
+    try {
+      await updateRouting({
+        action: "priority",
+        name: accountId,
+        priority,
+      })
+      handleRefresh()
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Priority update failed"
+      )
+    } finally {
+      setSavingPriorityAccountId(null)
+    }
+  }
+
+  if (isRefreshing) return <LimitsPageSkeleton />
 
   return (
     <ThemeProvider>
@@ -351,9 +419,14 @@ export function LimitsClient({ limits }: { limits: LimitsPayload }) {
             </div>
             <LimitsTable
               limits={limits}
+              routingStrategy={limits.routingStrategy}
               refreshing={isRefreshing}
               adminUnlocked={Boolean(adminToken)}
+              savingRoutingStrategy={savingRoutingStrategy}
+              savingPriorityAccountId={savingPriorityAccountId}
               redeemingAccountId={redeemingAccountId}
+              onRoutingStrategyChange={handleRoutingStrategyChange}
+              onPriorityChange={handlePriorityChange}
               onRedeem={handleRedeem}
             />
           </section>
